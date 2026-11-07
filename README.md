@@ -6,6 +6,12 @@ Playbook de cumplimiento basado en `CIS_Ubuntu_Linux_24.04_LTS_v2.0.0_L1_Server.
 - **Aplica también los controles críticos** listados en `cis_critical_controls` (SSH, PAM, montajes, cuentas, IPv6, etc.) con protecciones contra bloqueo: validación previa, respaldo y **restauración automática de SSH/PAM** si Ansible no logra volver a entrar.
 - Lo que sigue siendo de revisión manual (firewall activo, GRUB, parches, cuentas UID 0, etc.) se reporta por host con evidencia de solo lectura y la acción sugerida.
 
+## Nivel de cumplimiento
+
+Resultado de una auditoría de 259 controles: **241 aprobados (93.05 %)**, **8 con advertencias (3.09 %)** y **10 fallidos (3.86 %)**.
+
+![Resumen del nivel de cumplimiento de la auditoría](images/cumplimiento.png)
+
 ## Requisitos
 
 - Controlador: `ansible-core >= 2.15`. Solo usa módulos `ansible.builtin` (no requiere colecciones).
