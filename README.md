@@ -8,7 +8,12 @@ Playbook de cumplimiento basado en `CIS_Ubuntu_Linux_24.04_LTS_v2.0.0_L1_Server.
 
 ## Nivel de cumplimiento
 
-Resultado de una auditoría de 259 controles: **241 aprobados (93.05 %)**, **8 con advertencias (3.09 %)** y **10 fallidos (3.86 %)**.
+| **Aprobados** | **Advertencias** | **Fallidos** |
+|:---:|:---:|:---:|
+| **241** | **8** | **10** |
+| 93.05 % | 3.09 % | 3.86 % |
+
+**Total auditado: 259 controles**
 
 ![Resumen del nivel de cumplimiento de la auditoría](images/cumplimiento.png)
 
