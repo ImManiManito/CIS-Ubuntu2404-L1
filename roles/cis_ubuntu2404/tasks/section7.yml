@@ -1,0 +1,51 @@
+---
+# =============================================================================
+# SECCIÓN 7 - Mantenimiento del sistema
+# Se aplican solo permisos de archivos de cuentas (7.1.1-7.1.10).
+# Excluidos (revisión manual): 7.1.11 world-writable, 7.1.12 sin dueño,
+#   7.1.13 SUID/SGID, 7.2.1-7.2.10 integridad de cuentas, homes y dotfiles.
+# =============================================================================
+
+- name: "7.1.1-7.1.9 | Permisos de archivos de cuentas"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { id: "7.1.1", path: /etc/passwd,   group: root,   mode: "u-x,go-wx" }
+    - { id: "7.1.2", path: /etc/passwd-,  group: root,   mode: "u-x,go-wx" }
+    - { id: "7.1.3", path: /etc/group,    group: root,   mode: "u-x,go-wx" }
+    - { id: "7.1.4", path: /etc/group-,   group: root,   mode: "u-x,go-wx" }
+    - { id: "7.1.5", path: /etc/shadow,   group: shadow, mode: "u-x,g-wx,o-rwx" }
+    - { id: "7.1.6", path: /etc/shadow-,  group: shadow, mode: "u-x,g-wx,o-rwx" }
+    - { id: "7.1.7", path: /etc/gshadow,  group: shadow, mode: "u-x,g-wx,o-rwx" }
+    - { id: "7.1.8", path: /etc/gshadow-, group: shadow, mode: "u-x,g-wx,o-rwx" }
+    - { id: "7.1.9", path: /etc/shells,   group: root,   mode: "u-x,go-wx" }
+  loop_control:
+    label: "{{ item.id }} {{ item.path }}"
+  when: item.id not in cis_skip_controls
+  failed_when: false
+  register: cis_acct_files
+  tags: [cis_7.1.1, cis_7.1.2, cis_7.1.3, cis_7.1.4, cis_7.1.5, cis_7.1.6, cis_7.1.7, cis_7.1.8, cis_7.1.9, account_files]
+
+- name: "7.1.10 | Verificar /etc/security/opasswd"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: [/etc/security/opasswd, /etc/security/opasswd.old]
+  register: cis_opasswd
+  tags: [cis_7.1.10, account_files]
+
+- name: "7.1.10 | Permisos de /etc/security/opasswd (root:root, 0600)"
+  ansible.builtin.file:
+    path: "{{ item.item }}"
+    owner: root
+    group: root
+    mode: "u-x,go-rwx"
+  loop: "{{ cis_opasswd.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - "'7.1.10' not in cis_skip_controls"
+    - item.stat.exists
+  tags: [cis_7.1.10, account_files]

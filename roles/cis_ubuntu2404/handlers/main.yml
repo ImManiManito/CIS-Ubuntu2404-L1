@@ -1,0 +1,71 @@
+---
+- name: CIS reload sysctl
+  ansible.builtin.command: sysctl --system
+  changed_when: true
+  failed_when: false
+
+# --- SSH: primero se valida, después se recarga (si la validación falla, no se recarga)
+- name: CIS validate sshd
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+  listen: CIS reload sshd
+
+- name: CIS reload sshd service
+  ansible.builtin.command: systemctl try-reload-or-restart ssh.service  # noqa: command-instead-of-module
+  changed_when: true
+  when: cis_systemd | default(false)
+  listen: CIS reload sshd
+
+- name: CIS reload sshd (sin systemd)
+  ansible.builtin.command: pkill -HUP -o -x sshd
+  changed_when: true
+  failed_when: false
+  when: not (cis_systemd | default(false))
+  listen: CIS reload sshd
+
+- name: CIS restart journald
+  ansible.builtin.systemd_service:
+    name: systemd-journald.service
+    state: restarted
+  when: cis_systemd | default(false)
+
+# --- rsyslog: validar sintaxis antes de reiniciar
+- name: CIS validate rsyslog
+  ansible.builtin.command: rsyslogd -N1
+  changed_when: false
+  listen: CIS restart rsyslog
+
+- name: CIS restart rsyslog service
+  ansible.builtin.systemd_service:
+    name: rsyslog.service
+    state: restarted
+  when: cis_systemd | default(false)
+  listen: CIS restart rsyslog
+
+- name: CIS restart chrony
+  ansible.builtin.systemd_service:
+    name: chrony.service
+    state: restarted
+  when: cis_systemd | default(false)
+
+- name: CIS restart timesyncd
+  ansible.builtin.systemd_service:
+    name: systemd-timesyncd.service
+    state: restarted
+  when: cis_systemd | default(false)
+
+- name: CIS dconf update
+  ansible.builtin.command: dconf update
+  changed_when: true
+
+- name: CIS restart postfix
+  ansible.builtin.systemd_service:
+    name: postfix.service
+    state: restarted
+  when: cis_systemd | default(false)
+
+- name: CIS restart exim4
+  ansible.builtin.shell:
+    cmd: update-exim4.conf && systemctl restart exim4
+  changed_when: true
+  when: cis_systemd | default(false)

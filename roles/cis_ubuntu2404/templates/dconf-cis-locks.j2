@@ -1,0 +1,19 @@
+# {{ ansible_managed }}
+{% if '1.7.1' not in cis_skip_controls %}
+/org/gnome/login-screen/banner-message-enable
+/org/gnome/login-screen/banner-message-text
+{% endif %}
+{% if '1.7.2' not in cis_skip_controls %}
+/org/gnome/login-screen/disable-user-list
+{% endif %}
+{% if '1.7.3' not in cis_skip_controls %}
+/org/gnome/desktop/session/idle-delay
+/org/gnome/desktop/screensaver/lock-delay
+{% endif %}
+{% if '1.7.4' not in cis_skip_controls %}
+/org/gnome/desktop/media-handling/automount
+/org/gnome/desktop/media-handling/automount-open
+{% endif %}
+{% if '1.7.5' not in cis_skip_controls %}
+/org/gnome/desktop/media-handling/autorun-never
+{% endif %}

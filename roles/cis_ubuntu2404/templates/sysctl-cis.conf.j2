@@ -1,0 +1,6 @@
+# {{ ansible_managed }}
+# CIS Ubuntu 24.04 LTS v2.0.0 L1 Server - {{ cis_sysctl_title }}
+{% for i in cis_sysctl_items %}
+# CIS {{ i.id }}
+{{ i.key }} = {{ i.value }}
+{% endfor %}

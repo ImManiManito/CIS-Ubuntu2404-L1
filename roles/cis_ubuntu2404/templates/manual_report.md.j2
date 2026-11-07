@@ -1,0 +1,59 @@
+# CIS Ubuntu 24.04 LTS v2.0.0 L1 Server — Controles críticos y revisión manual
+
+| Campo | Valor |
+|---|---|
+| Host | {{ inventory_hostname }} ({{ ansible_facts['fqdn'] | default('') }}) |
+| SO | {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }} / kernel {{ ansible_facts['kernel'] }} |
+| Fecha | {{ ansible_facts['date_time']['iso8601'] }} |
+| Modo de ejecución | {{ 'CHECK (sin cambios)' if ansible_check_mode else 'APLICACIÓN' }} |
+| Controles excluidos por variable (cis_skip_controls) | {{ cis_skip_controls | join(', ') if cis_skip_controls else 'ninguno' }} |
+
+Controles de alto riesgo operativo. Los marcados como **Automática** los remedia el playbook
+(lista `cis_critical_controls`) y aquí se muestra su verificación posterior; los marcados como
+**Manual** no se tocan y requieren tu decisión. Evidencia recolectada en solo lectura.
+
+## Resumen
+
+| ID | Control | Remediación | Estado |
+|---|---|---|---|
+{% for r in cis_manual_report | default([]) %}
+| {{ r.id }} | {{ r.titulo | replace('|', '/') }} | {{ 'Automática' if r.aplicado else 'Manual' }} | {{ {'CUMPLE': '✅ CUMPLE', 'N/A': '➖ N/A'}.get(r.estado, '⚠️ REVISAR') }} |
+{% endfor %}
+
+## Controles diferidos durante la ejecución
+
+Avisos de la ejecución: controles que el playbook **omitió o dejó pendientes en este host** al detectar
+condiciones de riesgo, y cuentas afectadas por los cambios.
+
+{% if cis_deferred | default([]) | length > 0 %}
+| ID | Motivo |
+|---|---|
+{% for d in cis_deferred %}
+| {{ d.id }} | {{ d.motivo | replace('|', '/') }} |
+{% endfor %}
+{% else %}
+Ninguno.
+{% endif %}
+
+## Detalle
+
+{% for r in cis_manual_report | default([]) %}
+### {{ r.id }} — {{ r.titulo }}
+
+- **Estado:** {{ r.estado }}
+- **Remediación:** {{ 'Automática (cis_critical_controls)' if r.aplicado else 'Manual' }}
+- **Riesgo:** {{ r.riesgo }}
+- **Acción {{ 'aplicada / ajuste' if r.aplicado else 'sugerida' }}:** {{ r.accion }}
+
+```text
+{{ (r.evidencia[:80] | join('\n')) if r.evidencia else '(sin salida)' }}
+{% if r.evidencia | length > 80 %}
+... ({{ r.evidencia | length - 80 }} líneas más; ver evidencia completa ejecutando el comando en el host)
+{% endif %}
+```
+{% if r.error %}
+
+> stderr: {{ r.error | truncate(300) }}
+{% endif %}
+
+{% endfor %}

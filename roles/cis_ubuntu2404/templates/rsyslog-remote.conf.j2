@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# CIS 6.1.2.5 - Envío de logs a servidor remoto
+*.* action(type="omfwd" target="{{ cis_rsyslog_remote_host }}" port="{{ cis_rsyslog_remote_port }}" protocol="{{ cis_rsyslog_remote_protocol }}"
+           action.resumeRetryCount="100"
+           queue.type="LinkedList" queue.size="1000")

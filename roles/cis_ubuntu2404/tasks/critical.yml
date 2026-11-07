@@ -1,0 +1,453 @@
+---
+# =============================================================================
+# CONTROLES CRÍTICOS (cis_critical_controls)
+# Orden: PAM/su -> verificación de acceso (SSH nuevo + sudo) -> cancelar rollback
+#        -> cuentas, PATH, módulos, servicios, MTA, world-writable, montajes.
+# Los de SSH (5.1.4/5.1.6/5.1.12/5.1.15/5.1.20/5.1.23) están en section5.yml y
+# los de red (3.1.1, 3.3.x) en section3.yml.
+# =============================================================================
+
+# ---------------------------------------------------------------- 5.2.7 -------
+- name: "5.2.7 | Restringir su a un grupo vacío (pam_wheel)"
+  when:
+    - "'5.2.7' in cis_critical_controls"
+    - "'5.2.7' not in cis_skip_controls"
+  tags: [cis_5.2.7, critical, pam]
+  block:
+    - name: "5.2.7 | Grupo {{ cis_su_group }}"
+      ansible.builtin.group:
+        name: "{{ cis_su_group }}"
+        state: present
+
+    - name: "5.2.7 | pam_wheel en /etc/pam.d/su"
+      ansible.builtin.lineinfile:
+        path: /etc/pam.d/su
+        regexp: '^\s*auth\s+(required|requisite)\s+pam_wheel\.so'
+        line: "auth       required   pam_wheel.so use_uid group={{ cis_su_group }}"
+        insertafter: '^\s*auth\s+sufficient\s+pam_rootok\.so'
+
+    - name: "5.2.7 | Miembros del grupo {{ cis_su_group }} (debe estar vacío)"
+      ansible.builtin.getent:
+        database: group
+        key: "{{ cis_su_group }}"
+        fail_key: false
+
+    - name: "5.2.7 | Registrar si el grupo no está vacío"
+      ansible.builtin.set_fact:
+        cis_deferred: "{{ cis_deferred + [{'id': '5.2.7', 'motivo': 'El grupo ' ~ cis_su_group ~ ' tiene miembros (debe estar vacío): ' ~ cis_su_members}] }}"
+      vars:
+        cis_su_members: "{{ (ansible_facts.getent_group[cis_su_group] or ['', '', ''])[2] | default('', true) }}"
+      when: cis_su_members | length > 0
+
+# ---------------------------------------------------------------- 5.3.2.x / 5.3.3.4.x
+- name: "5.3.2.x/5.3.3.4.x | PAM: pam_unix, pam_faillock, pam_pwquality, pam_pwhistory"
+  when: (['5.3.2.x', '5.3.3.4.x'] | intersect(cis_critical_controls) | difference(cis_skip_controls) | length) > 0
+  tags: [cis_5.3.2.1, cis_5.3.2.2, cis_5.3.2.3, cis_5.3.2.4, cis_5.3.3.4.1, cis_5.3.3.4.2, cis_5.3.3.4.3, cis_5.3.3.4.4, critical, pam]
+  block:
+    - name: "5.3.2.x | Paquetes de módulos PAM"
+      ansible.builtin.apt:
+        name: [libpam-runtime, libpam-modules, libpam-pwquality]
+        state: present
+
+    - name: "5.3.2.x | Respaldo de /etc/pam.d y /usr/share/pam-configs"
+      ansible.builtin.shell:
+        cmd: |
+          d=/var/backups/cis-pam-$(date +%Y%m%d%H%M%S)
+          install -d -m 0700 "$d" && cp -a /etc/pam.d /usr/share/pam-configs "$d"/ && echo "$d"
+        executable: /bin/bash
+      register: cis_pam_backup
+      changed_when: false
+
+    - name: "5.3.2.2 | Perfil pam-auth-update faillock"
+      ansible.builtin.copy:
+        dest: /usr/share/pam-configs/faillock
+        content: |
+          Name: Enable pam_faillock to deny access
+          Default: yes
+          Priority: 0
+          Auth-Type: Primary
+          Auth:
+                  [default=die] pam_faillock.so authfail
+        owner: root
+        group: root
+        mode: "0644"
+      when: "'5.3.2.x' in cis_critical_controls"
+
+    - name: "5.3.2.2 | Perfil pam-auth-update faillock_notify"
+      ansible.builtin.copy:
+        dest: /usr/share/pam-configs/faillock_notify
+        content: |
+          Name: Notify of failed login attempts and reset count upon success
+          Default: yes
+          Priority: 1024
+          Auth-Type: Primary
+          Auth:
+                  requisite pam_faillock.so preauth
+          Account-Type: Primary
+          Account:
+                  required pam_faillock.so
+        owner: root
+        group: root
+        mode: "0644"
+      when: "'5.3.2.x' in cis_critical_controls"
+
+    - name: "5.3.2.4 | ¿Existe ya un perfil con pam_pwhistory?"
+      ansible.builtin.shell:
+        cmd: set -o pipefail; grep -lP '\bpam_pwhistory\.so\b' /usr/share/pam-configs/* 2>/dev/null | grep -v '/pwhistory$' || true
+        executable: /bin/bash
+      register: cis_pwhistory_other
+      changed_when: false
+      check_mode: false
+
+    - name: "5.3.2.4 | Perfil pam-auth-update pwhistory"
+      ansible.builtin.copy:
+        dest: /usr/share/pam-configs/pwhistory
+        content: |
+          Name: pwhistory password history checking
+          Default: yes
+          Priority: 1024
+          Password-Type: Primary
+          Password:
+                  requisite pam_pwhistory.so remember={{ cis_pwhistory_remember }} enforce_for_root use_authtok
+        owner: root
+        group: root
+        mode: "0644"
+      when:
+        - "'5.3.2.x' in cis_critical_controls"
+        - cis_pwhistory_other.stdout | length == 0
+
+    - name: "5.3.3.4.1/5.3.3.4.2 | Quitar nullok y remember= de pam_unix en los perfiles"
+      ansible.builtin.replace:
+        path: /usr/share/pam-configs/unix
+        regexp: '^(\s*[^#\n]*pam_unix\.so[^#\n]*?)\s+(nullok|remember=\d+)\b'
+        replace: '\1'
+      when: "'5.3.3.4.x' in cis_critical_controls"
+
+    - name: "5.3.2.x | Aplicar perfiles con pam-auth-update"
+      ansible.builtin.shell:
+        cmd: |
+          set -e -o pipefail
+          before="$(cat /etc/pam.d/common-* | md5sum)"
+          profiles="unix pwquality"
+          {% if '5.3.2.x' in cis_critical_controls %}
+          profiles="$profiles faillock faillock_notify"
+          {% if cis_pwhistory_other.stdout | length == 0 %}
+          profiles="$profiles pwhistory"
+          {% else %}
+          profiles="$profiles $(basename {{ cis_pwhistory_other.stdout_lines | first }})"
+          {% endif %}
+          {% endif %}
+          DEBIAN_FRONTEND=noninteractive pam-auth-update {{ '--force' if cis_pam_auth_update_force | bool else '' }} --enable $profiles
+          after="$(cat /etc/pam.d/common-* | md5sum)"
+          [ "$before" != "$after" ] && echo CHANGED || echo SAME
+        executable: /bin/bash
+      register: cis_pam_update
+      changed_when: "'CHANGED' in cis_pam_update.stdout"
+
+    - name: "5.3.2.x | Validar el stack PAM generado"
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          f=0
+          libdir="$(dirname "$(find /usr/lib /lib -name pam_unix.so -path '*security*' 2>/dev/null | head -1)")"
+          for m in $(grep -hoP '^\s*[^#\s].*?\K\bpam_\w+\.so\b' /etc/pam.d/common-* | sort -u); do
+            [ -f "$libdir/$m" ] || { echo "FALTA módulo $m"; f=1; }
+          done
+          grep -Pq '^\h*auth\h+[^#\n]*\bpam_unix\.so\b' /etc/pam.d/common-auth || { echo "FALTA pam_unix en common-auth"; f=1; }
+          {% if '5.3.2.x' in cis_critical_controls %}
+          grep -Pq '\bpam_faillock\.so\b.*\bpreauth\b' /etc/pam.d/common-auth || { echo "FALTA faillock preauth"; f=1; }
+          grep -Pq '\bpam_faillock\.so\b.*\bauthfail\b' /etc/pam.d/common-auth || { echo "FALTA faillock authfail"; f=1; }
+          grep -Pq '\bpam_faillock\.so\b' /etc/pam.d/common-account || { echo "FALTA faillock en account"; f=1; }
+          grep -Pq '\bpam_pwquality\.so\b' /etc/pam.d/common-password || { echo "FALTA pwquality"; f=1; }
+          grep -Pq '\bpam_pwhistory\.so\b' /etc/pam.d/common-password || { echo "FALTA pwhistory"; f=1; }
+          {% endif %}
+          {% if '5.3.3.4.x' in cis_critical_controls %}
+          grep -Pq '^\h*[^#\n\r]+\h+pam_unix\.so\b.*\bnullok\b' /etc/pam.d/common-* && { echo "SIGUE nullok"; f=1; }
+          grep -Pq '^\h*password\h+[^#\n\r]+\h+pam_unix\.so\b.*\buse_authtok\b' /etc/pam.d/common-password || { echo "FALTA use_authtok en pam_unix"; f=1; }
+          grep -Pq '^\h*password\h+[^#\n\r]+\h+pam_unix\.so\b.*\b(yescrypt|sha512)\b' /etc/pam.d/common-password || { echo "FALTA yescrypt/sha512"; f=1; }
+          {% endif %}
+          exit $f
+        executable: /bin/bash
+      register: cis_pam_validate
+      changed_when: false
+      when: not ansible_check_mode
+
+  rescue:
+    - name: "5.3.2.x | Error: restaurar /etc/pam.d desde el respaldo"
+      ansible.builtin.shell:
+        cmd: |
+          d="{{ cis_pam_backup.stdout | default('') }}"
+          [ -d "$d/pam.d" ] || exit 0
+          cp -a "$d"/pam.d/. /etc/pam.d/
+          rm -rf /usr/share/pam-configs && cp -a "$d"/pam-configs /usr/share/pam-configs
+          echo restaurado
+        executable: /bin/bash
+      changed_when: true
+
+    - name: "5.3.2.x | Detener ejecución"
+      ansible.builtin.fail:
+        msg: >-
+          La configuración PAM no se pudo aplicar/validar y se restauró el respaldo.
+          Salida: {{ (cis_pam_validate.stdout | default('')) ~ ' ' ~ (cis_pam_update.stderr | default('')) ~ ' ' ~ (ansible_failed_result.msg | default('')) }}.
+          Si hay cambios locales en /etc/pam.d/common-*, revisa y usa cis_pam_auth_update_force=true.
+
+# ---------------------------------------------------------------- VERIFICACIÓN
+- name: "VERIFICACIÓN | Aplicar handlers pendientes (recarga de sshd)"
+  ansible.builtin.meta: flush_handlers
+  tags: [always]
+
+- name: "VERIFICACIÓN | Cerrar la conexión actual para probar una sesión SSH nueva"
+  ansible.builtin.meta: reset_connection
+  tags: [always]
+
+- name: "VERIFICACIÓN | Sesión SSH nueva + sudo funcionan"
+  ansible.builtin.command: id -un
+  register: cis_access_check
+  changed_when: false
+  check_mode: false
+  tags: [always]
+
+- name: "VERIFICACIÓN | Acceso confirmado: cancelar restauración automática"
+  ansible.builtin.shell:
+    cmd: |
+      if systemctl is-active --quiet cis-rollback.timer; then
+        systemctl stop cis-rollback.timer cis-rollback.service 2>/dev/null
+        systemctl reset-failed cis-rollback.timer cis-rollback.service 2>/dev/null
+        echo CANCELADO
+      fi
+      # El respaldo incluye llaves privadas de host: se elimina al confirmar el acceso
+      rm -rf {{ cis_rollback_dir }}; true
+    executable: /bin/bash
+  register: cis_rollback_cancel
+  changed_when: "'CANCELADO' in cis_rollback_cancel.stdout"
+  when:
+    - cis_access_check.stdout == 'root'
+    - cis_systemd | bool
+  tags: [always]
+
+# ---------------------------------------------------------------- 5.4.1.1 / 5.4.1.5
+- name: "5.4.1.1/5.4.1.5 | Caducidad de contraseña en usuarios existentes"
+  when: (['5.4.1.1', '5.4.1.5'] | intersect(cis_critical_controls) | difference(cis_skip_controls) | length) > 0
+  tags: [cis_5.4.1.1, cis_5.4.1.5, critical]
+  block:
+    - name: "5.4.1.x | Usuario de conexión (protegido contra expiración inmediata)"
+      ansible.builtin.set_fact:
+        cis_connect_user: "{{ cis_connect_user | default(ansible_facts['env']['SUDO_USER'] | default(ansible_facts['user_id'])) }}"
+
+    - name: "5.4.1.x | Calcular usuarios a ajustar"
+      ansible.builtin.shell:
+        cmd: |
+          today=$(( $(date +%s) / 86400 ))
+          awk -F: -v t="$today" -v max={{ cis_pass_max_days }} -v ina={{ cis_inactive_days }} \
+              -v cu="{{ cis_connect_user }}" -v ex="{{ cis_password_aging_exclude | join(',') }}" '
+            BEGIN { n=split(ex, a, ","); for (i=1;i<=n;i++) skip[a[i]]=1 }
+            ($2 ~ /^\$.+\$/) && !($1 in skip) {
+              needmax = ($5 == "" || $5+0 > max || $5+0 < 1)
+              needina = ($7 == "" || $7+0 > ina || $7+0 < 0)
+              expnow = ($3 != "" && $3+0 + max <= t)
+              lock   = ($3 != "" && $3+0 + max + ina < t)
+              if ($1 == cu && needmax && expnow) { print "PROTECT " $1; next }
+              if (needmax) print "MAX " $1 (expnow ? " EXPIRA" : "") (lock ? " BLOQUEO" : "")
+              if (needina) print "INA " $1 (lock ? " BLOQUEO" : "")
+            }' /etc/shadow
+        executable: /bin/bash
+      register: cis_aging
+      changed_when: false
+      check_mode: false
+
+    - name: "5.4.1.1 | chage --maxdays {{ cis_pass_max_days }}"
+      ansible.builtin.command:
+        argv: [chage, --maxdays, "{{ cis_pass_max_days }}", "{{ item.split()[1] }}"]
+      loop: "{{ cis_aging.stdout_lines | select('match', '^MAX ') | list }}"
+      changed_when: true
+      when: "'5.4.1.1' in cis_critical_controls"
+
+    - name: "5.4.1.5 | chage --inactive {{ cis_inactive_days }}"
+      ansible.builtin.command:
+        argv: [chage, --inactive, "{{ cis_inactive_days }}", "{{ item.split()[1] }}"]
+      loop: "{{ cis_aging.stdout_lines | select('match', '^INA ') | list }}"
+      changed_when: true
+      when: "'5.4.1.5' in cis_critical_controls"
+
+    - name: "5.4.1.x | Registrar cuentas que expiran/se bloquean o se protegieron"
+      ansible.builtin.set_fact:
+        cis_deferred: >-
+          {{ cis_deferred + [{'id': '5.4.1.1',
+             'motivo': ('Usuario ' ~ item.split()[1] ~ ' (conexión de Ansible) NO se ajustó: su contraseña tiene más de ' ~ cis_pass_max_days ~ ' días y expiraría ya. Cambia su contraseña y vuelve a ejecutar.')
+                       if item.startswith('PROTECT') else
+                       ('Usuario ' ~ item.split()[1] ~ ': ' ~ ('cuenta BLOQUEADA por inactividad (contraseña vencida hace más de ' ~ cis_inactive_days ~ ' días)' if 'BLOQUEO' in item else 'contraseña vencida, deberá cambiarla en el siguiente login'))}] }}
+      loop: "{{ cis_aging.stdout_lines | select('search', 'PROTECT|EXPIRA|BLOQUEO') | list }}"
+
+# ---------------------------------------------------------------- 5.4.2.5 -----
+- name: "5.4.2.5 | Integridad del PATH de root"
+  ansible.builtin.script:
+    cmd: "cis_root_path.sh {{ 'check' if ansible_check_mode else 'fix' }}"
+    executable: /bin/bash
+  register: cis_root_path
+  changed_when: "'RESULT=changed' in cis_root_path.stdout"
+  check_mode: false
+  when:
+    - "'5.4.2.5' in cis_critical_controls"
+    - "'5.4.2.5' not in cis_skip_controls"
+  tags: [cis_5.4.2.5, critical]
+
+# ---------------------------------------------------------------- 1.1.1.10 ----
+- name: "1.1.1.10 | Deshabilitar usb-storage"
+  when:
+    - "'1.1.1.10' in cis_critical_controls"
+    - "'1.1.1.10' not in cis_skip_controls"
+  tags: [cis_1.1.1.10, critical, kernel_modules]
+  block:
+    - name: "1.1.1.10 | /etc/modprobe.d/cis-usb-storage.conf"
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/cis-usb-storage.conf
+        content: |
+          # CIS 1.1.1.10 - Gestionado por Ansible
+          install usb-storage /bin/false
+          blacklist usb-storage
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: "1.1.1.10 | Descargar el módulo si está cargado"
+      ansible.builtin.shell:  # noqa: risky-shell-pipe
+        cmd: |
+          if lsmod | grep -q '^usb_storage'; then
+            modprobe -r usb-storage 2>/dev/null || rmmod usb_storage 2>/dev/null || { echo "EN_USO"; exit 0; }
+            echo "DESCARGADO"
+          fi; true
+        executable: /bin/bash
+      register: cis_usb_unload
+      changed_when: "'DESCARGADO' in cis_usb_unload.stdout"
+      when: "'usb_storage' in cis_loaded_modules"
+
+    - name: "1.1.1.10 | Registrar si sigue en uso"
+      ansible.builtin.set_fact:
+        cis_deferred: "{{ cis_deferred + [{'id': '1.1.1.10', 'motivo': 'usb-storage está en uso (dispositivo montado); quedará bloqueado tras desmontar o reiniciar.'}] }}"
+      when: "'EN_USO' in (cis_usb_unload.stdout | default(''))"
+
+# ---------------------------------------------------------------- 1.1.1.11 ----
+- name: "1.1.1.11 | Bloquear módulos de filesystem no usados"
+  ansible.builtin.script:
+    cmd: "cis_fs_modules.sh {{ 'check' if ansible_check_mode else 'fix' }} {{ cis_fs_modules_keep | join(' ') }}"
+    executable: /bin/bash
+  register: cis_fs_mods
+  changed_when: "'RESULT=changed' in cis_fs_mods.stdout"
+  check_mode: false
+  when:
+    - "'1.1.1.11' in cis_critical_controls"
+    - "'1.1.1.11' not in cis_skip_controls"
+  tags: [cis_1.1.1.11, critical, kernel_modules]
+
+# ---------------------------------------------------------------- 2.1.2 -------
+- name: "2.1.2 | MTA solo en loopback"
+  when:
+    - "'2.1.2' in cis_critical_controls"
+    - "'2.1.2' not in cis_skip_controls"
+  tags: [cis_2.1.2, critical, services]
+  block:
+    - name: "2.1.2 | postfix: valores actuales"
+      ansible.builtin.command: postconf -h inet_interfaces inet_protocols
+      register: cis_postfix_cur
+      changed_when: false
+      check_mode: false
+      when: "'postfix' in ansible_facts.packages"
+
+    - name: "2.1.2 | postfix: inet_interfaces = loopback-only"
+      ansible.builtin.command: postconf -e inet_interfaces=loopback-only
+      changed_when: true
+      when:
+        - "'postfix' in ansible_facts.packages"
+        - cis_postfix_cur.stdout_lines[0] | default('') != 'loopback-only'
+      notify: CIS restart postfix
+
+    - name: "2.1.2 | postfix: inet_protocols = ipv4 (IPv6 deshabilitado por 3.1.1)"
+      ansible.builtin.command: postconf -e inet_protocols=ipv4
+      changed_when: true
+      when:
+        - "'postfix' in ansible_facts.packages"
+        - cis_ipv6_disable | bool
+        - "'3.1.1' in cis_critical_controls"
+        - cis_postfix_cur.stdout_lines[1] | default('') != 'ipv4'
+      notify: CIS restart postfix
+
+    - name: "2.1.2 | exim4: escuchar solo en loopback"
+      ansible.builtin.lineinfile:
+        path: /etc/exim4/update-exim4.conf.conf
+        regexp: '^\s*dc_local_interfaces\s*='
+        line: "dc_local_interfaces='127.0.0.1{{ '' if (cis_ipv6_disable | bool and '3.1.1' in cis_critical_controls) else ' ; ::1' }}'"
+      when: "'exim4-config' in ansible_facts.packages"
+      notify: CIS restart exim4
+
+# ---------------------------------------------------------------- 2.1.4 -------
+- name: "2.1.4 | Detener y enmascarar servicios no aprobados"
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+    masked: true
+  loop: "{{ cis_unapproved_services }}"
+  when:
+    - "'2.1.4' in cis_critical_controls"
+    - "'2.1.4' not in cis_skip_controls"
+    - cis_systemd | bool
+  tags: [cis_2.1.4, critical, services]
+
+- name: "2.1.4 | Desinstalar paquetes no aprobados"
+  ansible.builtin.apt:
+    name: "{{ cis_unapproved_packages }}"
+    state: absent
+    purge: true
+  when:
+    - "'2.1.4' in cis_critical_controls"
+    - "'2.1.4' not in cis_skip_controls"
+    - cis_unapproved_packages | length > 0
+  tags: [cis_2.1.4, critical, services]
+
+- name: "2.1.4 | Registrar si no hay lista de servicios no aprobados"
+  ansible.builtin.set_fact:
+    cis_deferred: "{{ cis_deferred + [{'id': '2.1.4', 'motivo': 'Define cis_unapproved_services / cis_unapproved_packages con base en los puertos en escucha del reporte (2.1.4) y vuelve a ejecutar con --tags cis_2.1.4.'}] }}"
+  when:
+    - "'2.1.4' in cis_critical_controls"
+    - "'2.1.4' not in cis_skip_controls"
+    - (cis_unapproved_services + cis_unapproved_packages) | length == 0
+  tags: [cis_2.1.4, critical, services]
+
+# ---------------------------------------------------------------- 7.1.11 ------
+- name: "7.1.11 | Archivos/directorios world-writable (o-w / sticky bit)"
+  ansible.builtin.script:
+    cmd: >-
+      cis_world_writable.sh {{ 'check' if ansible_check_mode else 'fix' }}
+      {% for p in cis_ww_extra_exclude_paths %}'{{ p }}' {% endfor %}
+    executable: /bin/bash
+  register: cis_ww
+  changed_when: "'RESULT=changed' in cis_ww.stdout"
+  check_mode: false
+  timeout: "{{ cis_find_timeout | int }}"
+  when:
+    - "'7.1.11' in cis_critical_controls"
+    - "'7.1.11' not in cis_skip_controls"
+  tags: [cis_7.1.11, critical]
+
+# ---------------------------------------------------------------- 1.1.2.x -----
+- name: "1.1.2.x | Opciones de montaje nodev/nosuid/noexec"
+  ansible.builtin.script:
+    cmd: >-
+      cis_mounts.sh {{ 'check' if ansible_check_mode else 'fix' }}
+      {{ '1' if cis_mounts_bind_if_not_separate | bool else '0' }}
+      {{ '1' if cis_mounts_apply_live | bool else '0' }}
+      {% for m in cis_mounts if m.id not in cis_skip_controls %}{{ m.path }}:{{ m.opts | join(',') }} {% endfor %}
+    executable: /bin/bash
+  register: cis_mounts_result
+  changed_when: "'RESULT=changed' in cis_mounts_result.stdout"
+  check_mode: false
+  when:
+    - "'1.1.2.x' in cis_critical_controls"
+    - "'1.1.2.x' not in cis_skip_controls"
+  tags: [cis_1.1.2, critical, mounts]
+
+- name: "1.1.2.x | Registrar montajes pendientes de reinicio"
+  ansible.builtin.set_fact:
+    cis_deferred: "{{ cis_deferred + [{'id': '1.1.2.x', 'motivo': item | regex_replace('^REBOOT ', '') ~ ' (reiniciar en ventana para que el escaneo lo vea).'}] }}"
+  loop: "{{ cis_mounts_result.stdout_lines | default([]) | select('match', '^REBOOT ') | list }}"
+  tags: [cis_1.1.2, critical, mounts]

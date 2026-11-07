@@ -1,0 +1,209 @@
+---
+# =============================================================================
+# SECCIÓN 6 - Logging y auditoría
+# Excluidos (revisión manual): 6.1.1.1.4 (permisos journald vía tmpfiles),
+#   6.1.2.5 (si no se define servidor remoto), 6.1.2.6 (si el host recibe logs).
+# =============================================================================
+
+# ---------------------------------------------------------------- 6.1.1 -------
+- name: "6.1.1.1.1 | systemd-journald activo"
+  ansible.builtin.systemd_service:
+    name: systemd-journald.service
+    state: started
+  when:
+    - "'6.1.1.1.1' not in cis_skip_controls"
+    - cis_systemd
+  tags: [cis_6.1.1.1.1, journald]
+
+- name: "6.1.1.1.2 | Estado de systemd-journal-remote"
+  ansible.builtin.command: systemctl is-active systemd-journal-remote.socket systemd-journal-remote.service  # noqa: command-instead-of-module
+  register: cis_journal_remote
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - cis_systemd
+    - "'systemd-journal-remote.socket' in cis_unit_files or 'systemd-journal-remote.service' in cis_unit_files"
+  tags: [cis_6.1.1.1.2, journald]
+
+- name: "6.1.1.1.2 | Detener y enmascarar systemd-journal-remote (si no está en uso)"
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    masked: true
+  loop: [systemd-journal-remote.socket, systemd-journal-remote.service]
+  when:
+    - "'6.1.1.1.2' not in cis_skip_controls"
+    - cis_journal_remote.stdout_lines is defined
+    - "'active' not in cis_journal_remote.stdout_lines"
+    - item in cis_unit_files
+  tags: [cis_6.1.1.1.2, journald]
+
+- name: "6.1.1.1.2 | Registrar journal-remote activo"
+  ansible.builtin.set_fact:
+    cis_deferred: "{{ cis_deferred + [{'id': '6.1.1.1.2', 'motivo': 'systemd-journal-remote está ACTIVO (posible colector de logs); no se detuvo.'}] }}"
+  when:
+    - "'6.1.1.1.2' not in cis_skip_controls"
+    - cis_journal_remote.stdout_lines is defined
+    - "'active' in cis_journal_remote.stdout_lines"
+  tags: [cis_6.1.1.1.2, journald]
+
+- name: "6.1.1.1.3/6.1.1.1.5/6.1.1.1.6/6.1.1.1.7 | Drop-in de journald"
+  ansible.builtin.template:
+    src: journald-cis.conf.j2
+    dest: /etc/systemd/journald.conf.d/60-cis.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: CIS restart journald
+  tags: [cis_6.1.1.1.3, cis_6.1.1.1.5, cis_6.1.1.1.6, cis_6.1.1.1.7, journald]
+
+# ---------------------------------------------------------------- 6.1.2 -------
+- name: "6.1.2.1 | rsyslog instalado"
+  ansible.builtin.apt:
+    name: rsyslog
+    state: present
+  when: "'6.1.2.1' not in cis_skip_controls"
+  tags: [cis_6.1.2.1, rsyslog]
+
+- name: "6.1.2.2 | rsyslog habilitado y activo"
+  ansible.builtin.systemd_service:
+    name: rsyslog.service
+    enabled: true
+    state: started
+    masked: false
+  when:
+    - "'6.1.2.2' not in cis_skip_controls"
+    - cis_systemd
+  ignore_errors: "{{ ansible_check_mode }}"
+  tags: [cis_6.1.2.2, rsyslog]
+
+- name: "6.1.2.3 | Valor actual de $FileCreateMode"
+  ansible.builtin.shell:
+    cmd: |
+        set -o pipefail
+        grep -Ph '^\h*\$FileCreateMode\h+' /etc/rsyslog.conf /etc/rsyslog.d/*.conf 2>/dev/null | awk '{print $2}' || true
+  args:
+    executable: /bin/bash
+  register: cis_rsyslog_fcm
+  changed_when: false
+  check_mode: false
+  tags: [cis_6.1.2.3, rsyslog]
+
+- name: "6.1.2.3 | $FileCreateMode 0640 en /etc/rsyslog.conf"
+  ansible.builtin.lineinfile:
+    path: /etc/rsyslog.conf
+    regexp: '^\s*\$FileCreateMode\s+'
+    line: "$FileCreateMode 0640"
+    insertbefore: '^\s*\$IncludeConfig'
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - "'6.1.2.3' not in cis_skip_controls"
+    - (cis_rsyslog_fcm.stdout_lines | default([]) | length == 0) or
+      (cis_rsyslog_fcm.stdout_lines | reject('match', '^0?[0-6][0-4]0$') | list | length > 0)
+  notify: CIS restart rsyslog
+  tags: [cis_6.1.2.3, rsyslog]
+
+- name: "6.1.2.4 | Reglas de logging CIS"
+  ansible.builtin.template:
+    src: rsyslog-cis.conf.j2
+    dest: /etc/rsyslog.d/60-cis.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - "'6.1.2.4' not in cis_skip_controls"
+    - cis_rsyslog_rules | bool
+  notify: CIS restart rsyslog
+  tags: [cis_6.1.2.4, rsyslog]
+
+- name: "6.1.2.4/6.1.2.7 | Rotación de los nuevos archivos de log"
+  ansible.builtin.template:
+    src: logrotate-cis.j2
+    dest: /etc/logrotate.d/cis-rsyslog
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - "'6.1.2.4' not in cis_skip_controls"
+    - cis_rsyslog_rules | bool
+  tags: [cis_6.1.2.4, cis_6.1.2.7, rsyslog]
+
+- name: "6.1.2.5 | Envío de logs a servidor remoto (solo si se definió)"
+  ansible.builtin.template:
+    src: rsyslog-remote.conf.j2
+    dest: /etc/rsyslog.d/90-cis-remote.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - "'6.1.2.5' not in cis_skip_controls"
+    - cis_rsyslog_remote_host | length > 0
+  notify: CIS restart rsyslog
+  tags: [cis_6.1.2.5, rsyslog]
+
+- name: "6.1.2.7 | logrotate instalado"
+  ansible.builtin.apt:
+    name: logrotate
+    state: present
+  when: "'6.1.2.7' not in cis_skip_controls"
+  tags: [cis_6.1.2.7, rsyslog]
+
+# ---------------------------------------------------------------- 6.1.3 -------
+- name: "6.1.3.1 | Permisos y propietarios de archivos en /var/log"
+  ansible.builtin.script:
+    cmd: "cis_varlog_perms.sh {{ 'check' if ansible_check_mode else 'fix' }}"
+    executable: /bin/bash
+  register: cis_varlog
+  changed_when: "'RESULT=changed' in cis_varlog.stdout"
+  check_mode: false
+  when:
+    - "'6.1.3.1' not in cis_skip_controls"
+    - cis_fix_varlog_permissions | bool
+  tags: [cis_6.1.3.1, logfiles]
+
+# ---------------------------------------------------------------- 6.3 AIDE ----
+- name: "6.3.1 | Instalar AIDE"
+  ansible.builtin.apt:
+    name: [aide, aide-common]
+    state: present
+  register: cis_aide_pkg
+  when:
+    - "'6.3.1' not in cis_skip_controls"
+    - cis_aide_install | bool
+  tags: [cis_6.3.1, aide]
+
+- name: "6.3.1 | Verificar base de datos de AIDE"
+  ansible.builtin.stat:
+    path: /var/lib/aide/aide.db
+  register: cis_aide_db
+  tags: [cis_6.3.1, aide]
+
+- name: "6.3.1 | Inicializar base de datos de AIDE en segundo plano (no bloquea)"
+  ansible.builtin.command: systemd-run --unit=cis-aideinit --no-block aideinit -y -f
+  args:
+    creates: /var/lib/aide/aide.db
+  register: cis_aideinit
+  failed_when: cis_aideinit.rc != 0 and 'already' not in cis_aideinit.stderr
+  when:
+    - "'6.3.1' not in cis_skip_controls"
+    - cis_aide_install | bool
+    - not cis_aide_db.stat.exists
+    - not ansible_check_mode
+  tags: [cis_6.3.1, aide]
+
+- name: "6.3.2 | Habilitar verificación diaria de integridad (dailyaidecheck.timer)"
+  ansible.builtin.systemd_service:
+    name: dailyaidecheck.timer
+    enabled: true
+    state: started
+    masked: false
+  when:
+    - "'6.3.2' not in cis_skip_controls"
+    - cis_systemd
+    - cis_aide_install | bool
+  ignore_errors: "{{ ansible_check_mode }}"
+  tags: [cis_6.3.2, aide]

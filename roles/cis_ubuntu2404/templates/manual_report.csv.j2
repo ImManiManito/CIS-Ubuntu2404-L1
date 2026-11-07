@@ -1,0 +1,7 @@
+host,id,control,remediacion,estado,accion
+{% for r in cis_manual_report | default([]) %}
+"{{ inventory_hostname }}","{{ r.id }}","{{ r.titulo | replace('"', "'") }}","{{ 'Automatica' if r.aplicado else 'Manual' }}","{{ r.estado }}","{{ r.accion | replace('"', "'") }}"
+{% endfor %}
+{% for d in cis_deferred | default([]) %}
+"{{ inventory_hostname }}","{{ d.id }}","Aviso de ejecución","-","REVISAR","{{ d.motivo | replace('"', "'") }}"
+{% endfor %}

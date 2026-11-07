@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# CIS 2.3.3.1 - Servidores de tiempo autorizados
+{% for s in cis_ntp_servers %}
+server {{ s }} iburst
+{% endfor %}

@@ -1,0 +1,12 @@
+---
+# CIS Ubuntu Linux 24.04 LTS Benchmark v2.0.0 - Level 1 Server
+# Uso recomendado:
+#   1) ansible-playbook site.yml --check --diff -l <host>      (simulación + reporte)
+#   2) ansible-playbook site.yml -l <host>                     (aplicación)
+#   3) ansible-playbook site.yml --tags manual_review          (solo reporte de revisión manual)
+- name: CIS Ubuntu 24.04 LTS L1 Server - hardening seguro + reporte de revisión manual
+  hosts: ubuntu2404
+  become: true
+  gather_facts: true
+  roles:
+    - role: cis_ubuntu2404

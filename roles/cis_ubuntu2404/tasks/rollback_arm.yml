@@ -1,0 +1,51 @@
+---
+# =============================================================================
+# RED DE SEGURIDAD (dead man's switch) para cambios de SSH y PAM.
+# Antes de tocar SSH/PAM se respalda /etc/ssh y /etc/pam.d y se programa una
+# restauración automática en cis_rollback_minutes. Si al final Ansible logra abrir
+# una sesión SSH NUEVA + sudo, la restauración se cancela (ver critical.yml).
+# Si te quedas sin acceso, el servidor se restaura solo al vencer el tiempo.
+# =============================================================================
+- name: "ROLLBACK | Programar restauración automática de SSH/PAM"
+  when:
+    - not ansible_check_mode
+    - cis_systemd | bool
+    - cis_rollback_enabled | bool
+    - (cis_critical_controls | intersect(['5.1.4', '5.1.6', '5.1.12', '5.1.15', '5.1.20', '5.1.23', '5.2.7', '5.3.2.x', '5.3.3.4.x'])
+       | difference(cis_skip_controls) | length) > 0
+  tags: [always]
+  block:
+    - name: "ROLLBACK | Respaldar /etc/ssh y /etc/pam.d"
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          systemctl stop cis-rollback.timer cis-rollback.service 2>/dev/null || true
+          systemctl reset-failed cis-rollback.timer cis-rollback.service 2>/dev/null || true
+          rm -rf {{ cis_rollback_dir }}
+          install -d -m 0700 {{ cis_rollback_dir }}
+          cp -a /etc/ssh {{ cis_rollback_dir }}/ssh
+          cp -a /etc/pam.d {{ cis_rollback_dir }}/pam.d
+          cp -a /usr/share/pam-configs {{ cis_rollback_dir }}/pam-configs
+          cat > /usr/local/sbin/cis-rollback.sh <<'EOS'
+          #!/bin/sh
+          # Restauración automática CIS (SSH/PAM) - no se canceló a tiempo
+          D={{ cis_rollback_dir }}
+          [ -d "$D/ssh" ] || exit 0
+          rm -rf /etc/ssh.cis-failed /etc/pam.d.cis-failed
+          mv /etc/ssh /etc/ssh.cis-failed && cp -a "$D/ssh" /etc/ssh
+          mv /etc/pam.d /etc/pam.d.cis-failed && cp -a "$D/pam.d" /etc/pam.d
+          rm -rf /usr/share/pam-configs && cp -a "$D/pam-configs" /usr/share/pam-configs
+          systemctl try-reload-or-restart ssh.service
+          logger -t cis-rollback "Configuracion SSH/PAM restaurada desde $D (no se confirmo el acceso)"
+          EOS
+          chmod 0700 /usr/local/sbin/cis-rollback.sh
+          systemd-run --unit=cis-rollback --description="CIS rollback SSH/PAM" \
+            --on-active={{ cis_rollback_minutes }}min /usr/local/sbin/cis-rollback.sh
+        executable: /bin/bash
+      changed_when: true
+
+    - name: "ROLLBACK | Aviso"
+      ansible.builtin.debug:
+        msg: >-
+          Restauración automática de SSH/PAM programada en {{ cis_rollback_minutes }} min
+          (respaldo en {{ cis_rollback_dir }}). Se cancela sola si al final la verificación de acceso es exitosa.

@@ -1,0 +1,56 @@
+---
+# =============================================================================
+# Ajustes por organización / grupo. Los valores por defecto (alineados al .audit)
+# están en roles/cis_ubuntu2404/defaults/main.yml. Descomenta lo que necesites.
+# =============================================================================
+
+# Controles que no deben tocarse en este grupo (IDs CIS)
+# cis_skip_controls: ["5.1.16", "1.5.3"]
+
+# Banner legal (BANNER_TEXT del .audit)
+# cis_banner_text: "All activities performed on this system will be monitored."
+
+# Servicios aprobados en estos hosts (no se enmascaran aunque CIS los liste)
+# cis_services_approved: ["nginx", "rsync"]
+
+# Servidores NTP autorizados (2.3.2.1 / 2.3.3.1)
+# cis_ntp_servers: ["ntp1.inntec.local", "ntp2.inntec.local"]
+
+# Usuarios adicionales permitidos en cron.allow / at.allow
+# cis_cron_allow_users: ["appuser"]
+# cis_at_allow_users: []
+
+# Servidor de logs remoto (6.1.2.5). Vacío = queda en revisión manual
+# cis_rsyslog_remote_host: "siem.inntec.local"
+# cis_rsyslog_remote_port: 514
+# cis_rsyslog_remote_protocol: tcp
+
+# AIDE: la inicialización consume CPU/IO
+# cis_aide_install: true
+
+# =============================================================================
+# CONTROLES CRÍTICOS (ver README). Se aplican todos los de cis_critical_controls.
+# Para excluir uno en un grupo/host: cis_skip_controls: ["1.1.2.x"]
+# =============================================================================
+
+# 5.1.4 - usuarios adicionales con acceso SSH (además del usuario de Ansible y sudo)
+# cis_ssh_allowed_users: ["svc_backup", "jmendoza"]
+
+# 3.3.x - forzar forwarding=0 aunque haya Docker/K8s activos (los contenedores pierden red)
+# cis_forwarding_skip_if_containers: false
+
+# 3.1.1 - dejar IPv6 habilitado (solo se documenta su estado)
+# cis_ipv6_disable: false
+
+# 2.1.4 - servicios/paquetes no aprobados (llenar con base en el reporte de 2.1.4)
+# cis_unapproved_services: ["cups.service"]
+# cis_unapproved_packages: ["cups"]
+
+# 5.4.1.1 / 5.4.1.5 - cuentas a las que no se les cambia la caducidad
+# cis_password_aging_exclude: ["svc_app"]
+
+# 1.1.2.x - no montar en caliente (solo dejar fstab listo para el siguiente reinicio)
+# cis_mounts_apply_live: false
+
+# Red de seguridad SSH/PAM (minutos antes de restaurar si no se confirma acceso)
+# cis_rollback_minutes: 30

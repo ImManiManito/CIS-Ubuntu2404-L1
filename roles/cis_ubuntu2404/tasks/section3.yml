@@ -1,0 +1,195 @@
+---
+# =============================================================================
+# SECCIÓN 3 - Red
+# Críticos aplicados (cis_critical_controls): 3.1.1 (IPv6 deshabilitado por sysctl),
+#   3.3.2.7/3.3.2.8 (accept_ra=0), forwarding 3.3.1.2/3.3.1.3/3.3.2.1/3.3.2.2
+#   (excepto si hay runtime de contenedores activo y cis_forwarding_skip_if_containers).
+# Revisión manual: 3.1.2 (wireless), 3.3.1.12/3.3.1.13 (rp_filter).
+# =============================================================================
+
+- name: "3.1.3 | Detener y enmascarar bluetooth.service"
+  ansible.builtin.systemd_service:
+    name: bluetooth.service
+    state: stopped
+    enabled: false
+    masked: true
+  when:
+    - "'3.1.3' not in cis_skip_controls"
+    - "'bluetooth.service' in cis_unit_files"
+  tags: [cis_3.1.3]
+
+- name: "3.2.1-3.2.6 | Deshabilitar módulos de protocolos de red no requeridos"
+  ansible.builtin.copy:
+    dest: "/etc/modprobe.d/cis-{{ item.mod }}.conf"
+    content: |
+      # CIS {{ item.id }} - Gestionado por Ansible
+      install {{ item.mod }} /bin/false
+      blacklist {{ item.mod }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ cis_kernel_modules_net }}"
+  loop_control:
+    label: "{{ item.id }} {{ item.mod }}"
+  when:
+    - item.id not in cis_skip_controls
+    - not (cis_modules_skip_if_loaded | bool and (item.mod | replace('-', '_')) in cis_loaded_modules)
+  tags: [cis_3.2.1, cis_3.2.2, cis_3.2.3, cis_3.2.4, cis_3.2.5, cis_3.2.6, kernel_modules]
+
+- name: "3.2.x | Registrar módulos de red cargados que no se bloquearon"
+  ansible.builtin.set_fact:
+    cis_deferred: "{{ cis_deferred + [{'id': item.id, 'motivo': 'Módulo ' ~ item.mod ~ ' está cargado (en uso); no se bloqueó. Validar si es requerido.'}] }}"
+  loop: "{{ cis_kernel_modules_net }}"
+  loop_control:
+    label: "{{ item.id }} {{ item.mod }}"
+  when:
+    - item.id not in cis_skip_controls
+    - cis_modules_skip_if_loaded | bool
+    - (item.mod | replace('-', '_')) in cis_loaded_modules
+  tags: [cis_3.2.1, cis_3.2.2, cis_3.2.3, cis_3.2.4, cis_3.2.5, cis_3.2.6, kernel_modules]
+
+# ---------------------------------------------------------------- 3.3 ---------
+- name: "3.3.x | Verificar si IPv6 está disponible en el kernel"
+  ansible.builtin.stat:
+    path: /proc/sys/net/ipv6/conf/all/forwarding
+  register: cis_ipv6_proc
+  tags: [always]
+
+- name: "3.3.x | Leer valores actuales de forwarding"
+  ansible.builtin.command:
+    argv: [sysctl, -n, "{{ item }}"]
+  loop:
+    - net.ipv4.conf.all.forwarding
+    - net.ipv4.conf.default.forwarding
+    - net.ipv6.conf.all.forwarding
+    - net.ipv6.conf.default.forwarding
+  register: cis_fwd_runtime
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [always]
+
+- name: "3.3.x | Mapear forwarding en runtime"
+  ansible.builtin.set_fact:
+    cis_fwd: "{{ dict(cis_fwd_runtime.results | map(attribute='item') | zip(cis_fwd_runtime.results | map(attribute='stdout', default=''))) }}"
+  tags: [always]
+
+- name: "3.3.x | Definir parámetros sysctl de red"
+  ansible.builtin.set_fact:
+    cis_sysctl_net_all: >-
+      {{ [
+        {'id': '3.3.1.2',  'key': 'net.ipv4.conf.all.forwarding',              'value': '0', 'v6': false, 'fwd': true},
+        {'id': '3.3.1.3',  'key': 'net.ipv4.conf.default.forwarding',          'value': '0', 'v6': false, 'fwd': true},
+        {'id': '3.3.1.4',  'key': 'net.ipv4.conf.all.send_redirects',          'value': '0', 'v6': false, 'fwd': false},
+        {'id': '3.3.1.5',  'key': 'net.ipv4.conf.default.send_redirects',      'value': '0', 'v6': false, 'fwd': false},
+        {'id': '3.3.1.6',  'key': 'net.ipv4.icmp_ignore_bogus_error_responses','value': '1', 'v6': false, 'fwd': false},
+        {'id': '3.3.1.7',  'key': 'net.ipv4.icmp_echo_ignore_broadcasts',      'value': '1', 'v6': false, 'fwd': false},
+        {'id': '3.3.1.8',  'key': 'net.ipv4.conf.all.accept_redirects',        'value': '0', 'v6': false, 'fwd': false},
+        {'id': '3.3.1.9',  'key': 'net.ipv4.conf.default.accept_redirects',    'value': '0', 'v6': false, 'fwd': false},
+        {'id': '3.3.1.10', 'key': 'net.ipv4.conf.all.secure_redirects',        'value': '0', 'v6': false, 'fwd': false},
+        {'id': '3.3.1.11', 'key': 'net.ipv4.conf.default.secure_redirects',    'value': '0', 'v6': false, 'fwd': false},
+        {'id': '3.3.1.14', 'key': 'net.ipv4.conf.all.accept_source_route',     'value': '0', 'v6': false, 'fwd': false},
+        {'id': '3.3.1.15', 'key': 'net.ipv4.conf.default.accept_source_route', 'value': '0', 'v6': false, 'fwd': false},
+        {'id': '3.3.1.16', 'key': 'net.ipv4.conf.all.log_martians',            'value': '1', 'v6': false, 'fwd': false},
+        {'id': '3.3.1.17', 'key': 'net.ipv4.conf.default.log_martians',        'value': '1', 'v6': false, 'fwd': false},
+        {'id': '3.3.1.18', 'key': 'net.ipv4.tcp_syncookies',                   'value': '1', 'v6': false, 'fwd': false},
+        {'id': '3.3.2.1',  'key': 'net.ipv6.conf.all.forwarding',              'value': '0', 'v6': true,  'fwd': true},
+        {'id': '3.3.2.2',  'key': 'net.ipv6.conf.default.forwarding',          'value': '0', 'v6': true,  'fwd': true},
+        {'id': '3.3.2.3',  'key': 'net.ipv6.conf.all.accept_redirects',        'value': '0', 'v6': true,  'fwd': false},
+        {'id': '3.3.2.4',  'key': 'net.ipv6.conf.default.accept_redirects',    'value': '0', 'v6': true,  'fwd': false},
+        {'id': '3.3.2.5',  'key': 'net.ipv6.conf.all.accept_source_route',     'value': '0', 'v6': true,  'fwd': false},
+        {'id': '3.3.2.6',  'key': 'net.ipv6.conf.default.accept_source_route', 'value': '0', 'v6': true,  'fwd': false},
+        {'id': '3.3.2.7',  'key': 'net.ipv6.conf.all.accept_ra',               'value': '0', 'v6': true,  'fwd': false},
+        {'id': '3.3.2.8',  'key': 'net.ipv6.conf.default.accept_ra',           'value': '0', 'v6': true,  'fwd': false}
+      ] | rejectattr('id', 'in', cis_skip_controls)
+        | rejectattr('id', 'in', ['3.3.2.7', '3.3.2.8'] | difference(cis_critical_controls)) | list
+        + ([
+          {'id': '3.1.1', 'key': 'net.ipv6.conf.all.disable_ipv6',     'value': '1', 'v6': true, 'fwd': false},
+          {'id': '3.1.1', 'key': 'net.ipv6.conf.default.disable_ipv6', 'value': '1', 'v6': true, 'fwd': false}
+        ] if (cis_ipv6_disable | bool and '3.1.1' in cis_critical_controls and '3.1.1' not in cis_skip_controls) else []) }}
+  tags: [always]
+
+- name: "3.3.x | Filtrar IPv6 no disponible y forwarding en uso"
+  ansible.builtin.set_fact:
+    cis_sysctl_net: >-
+      {{ cis_sysctl_net_all
+         | rejectattr('v6') | list
+         + ((cis_sysctl_net_all | selectattr('v6') | list) if cis_ipv6_proc.stat.exists else []) }}
+    cis_fwd_in_use: >-
+      {{ cis_sysctl_net_all | selectattr('fwd')
+         | selectattr('key', 'in', cis_fwd | dict2items | rejectattr('value', 'in', ['0', '']) | map(attribute='key') | list)
+         | list }}
+  tags: [always]
+
+- name: "3.3.x | Detectar runtimes de contenedores activos"
+  ansible.builtin.shell:
+    cmd: |
+      for u in docker containerd podman kubelet k3s crio; do
+        [ "$(systemctl is-active "$u" 2>/dev/null)" = active ] && echo "$u"
+      done; true
+  register: cis_container_rt
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [always]
+
+- name: "3.3.x | Decidir si se protege el forwarding"
+  ansible.builtin.set_fact:
+    cis_fwd_protect: >-
+      {{ (cis_fwd_in_use | length > 0) and
+         (cis_forwarding_only_if_disabled | bool or
+          (cis_forwarding_skip_if_containers | bool and (cis_container_rt.stdout_lines | default([]) | length > 0))) }}
+  tags: [always]
+
+- name: "3.3.x | Excluir forwarding activo (contenedores/ruteo)"
+  ansible.builtin.set_fact:
+    cis_sysctl_net: "{{ cis_sysctl_net | rejectattr('key', 'in', cis_fwd_in_use | map(attribute='key') | list) | list }}"
+  when: cis_fwd_protect | bool
+  tags: [always]
+
+- name: "3.3.x | Registrar forwarding no aplicado"
+  ansible.builtin.set_fact:
+    cis_deferred: >-
+      {{ cis_deferred + [{'id': item.id, 'motivo': item.key ~ '=' ~ cis_fwd[item.key] ~ ' en runtime; no se deshabilitó'
+         ~ ((' porque hay contenedores activos (' ~ (cis_container_rt.stdout_lines | join(', ')) ~ '). Para forzarlo: cis_forwarding_skip_if_containers=false (los contenedores pierden red).')
+            if (cis_container_rt.stdout_lines | default([]) | length > 0) else ' (cis_forwarding_only_if_disabled=true).')}] }}
+  loop: "{{ cis_fwd_in_use if cis_fwd_protect | bool else [] }}"
+  loop_control:
+    label: "{{ item.id }}"
+  tags: [always]
+
+- name: "3.3.x | Drop-in sysctl de red"
+  ansible.builtin.template:
+    src: sysctl-cis.conf.j2
+    dest: /etc/sysctl.d/60-cis-network.conf
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    cis_sysctl_items: "{{ cis_sysctl_net }}"
+    cis_sysctl_title: "Parámetros de red (sección 3.3)"
+  notify: CIS reload sysctl
+  tags: [cis_3.3.1.2, cis_3.3.1.3, cis_3.3.1.4, cis_3.3.1.5, cis_3.3.1.6, cis_3.3.1.7, cis_3.3.1.8, cis_3.3.1.9,
+         cis_3.3.1.10, cis_3.3.1.11, cis_3.3.1.14, cis_3.3.1.15, cis_3.3.1.16, cis_3.3.1.17, cis_3.3.1.18,
+         cis_3.3.2.1, cis_3.3.2.2, cis_3.3.2.3, cis_3.3.2.4, cis_3.3.2.5, cis_3.3.2.6, cis_3.3.2.7, cis_3.3.2.8, cis_3.1.1, sysctl]
+
+- name: "3.3.x | Comentar valores sysctl de red en conflicto (incluye /etc/ufw/sysctl.conf)"
+  ansible.builtin.script:
+    cmd: >-
+      cis_sysctl_fix.sh {{ 'check' if ansible_check_mode else 'fix' }} /etc/sysctl.d/60-cis-network.conf
+      {% for i in cis_sysctl_net %}'{{ i.key }}={{ i.allow | default(i.value) }}' {% endfor %}
+    executable: /bin/bash
+  register: cis_sysctl_net_fix
+  changed_when: "'RESULT=changed' in cis_sysctl_net_fix.stdout"
+  check_mode: false
+  when: cis_sysctl_net | length > 0
+  notify: CIS reload sysctl
+  tags: [cis_3.3.1.2, cis_3.3.1.3, cis_3.3.1.4, cis_3.3.1.5, cis_3.3.1.6, cis_3.3.1.7, cis_3.3.1.8, cis_3.3.1.9,
+         cis_3.3.1.10, cis_3.3.1.11, cis_3.3.1.14, cis_3.3.1.15, cis_3.3.1.16, cis_3.3.1.17, cis_3.3.1.18,
+         cis_3.3.2.1, cis_3.3.2.2, cis_3.3.2.3, cis_3.3.2.4, cis_3.3.2.5, cis_3.3.2.6, cis_3.3.2.7, cis_3.3.2.8, cis_3.1.1, sysctl]
+
+- name: "3.3.x | Registrar valores sysctl en conflicto en archivos de paquete (/usr/lib/sysctl.d)"
+  ansible.builtin.set_fact:
+    cis_deferred: "{{ cis_deferred + [{'id': '3.3.x', 'motivo': item | regex_replace('^WARN ', '')}] }}"
+  loop: "{{ cis_sysctl_net_fix.stdout_lines | default([]) | select('match', '^WARN ') | list }}"
+  tags: [sysctl]

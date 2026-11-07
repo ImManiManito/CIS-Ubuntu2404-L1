@@ -1,0 +1,424 @@
+---
+# =============================================================================
+# SECCIÓN 5 - Acceso, autenticación y autorización
+# Críticos aplicados aquí (cis_critical_controls): 5.1.4 AllowGroups, 5.1.6 Ciphers,
+#   5.1.12/5.1.23 KexAlgorithms, 5.1.15 MACs, 5.1.20 PermitRootLogin no.
+#   (5.2.7, 5.3.2.x, 5.3.3.4.x, 5.4.1.1, 5.4.1.5 y 5.4.2.5 están en critical.yml)
+# Revisión manual: 5.2.5 !authenticate, 5.4.1.6, 5.4.2.1-5.4.2.4, 5.4.2.7/5.4.2.8.
+# =============================================================================
+
+# ---------------------------------------------------------------- 5.1 SSH -----
+- name: "5.1.x | OpenSSH server"
+  when: "'openssh-server' in ansible_facts.packages"
+  tags: [ssh]
+  block:
+    - name: "5.1.x | Directorio de separación de privilegios (requerido por sshd -t)"
+      ansible.builtin.file:
+        path: /run/sshd
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags: [always]
+
+    - name: "5.1.x | Verificar Include de sshd_config.d"
+      ansible.builtin.command: grep -Eiq '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config
+      register: cis_sshd_include
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "5.1.x | Agregar Include de sshd_config.d al inicio (si falta)"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        line: "Include /etc/ssh/sshd_config.d/*.conf"
+        insertbefore: BOF
+        validate: /usr/sbin/sshd -t -f %s
+      when: cis_sshd_include.rc != 0
+      notify: CIS reload sshd
+      tags: [cis_5.1.5, cis_5.1.7, cis_5.1.10, cis_5.1.11, cis_5.1.13, cis_5.1.14, cis_5.1.16, cis_5.1.17,
+             cis_5.1.18, cis_5.1.19, cis_5.1.21, cis_5.1.22]
+
+    - name: "5.1.x | Usuario con el que se conecta Ansible"
+      ansible.builtin.set_fact:
+        cis_connect_user: "{{ ansible_facts['env']['SUDO_USER'] | default(ansible_facts['user_id']) }}"
+      tags: [always]
+
+    - name: "5.1.20 | Protección: no deshabilitar root por SSH si Ansible entra como root"
+      ansible.builtin.assert:
+        that: cis_connect_user != 'root'
+        fail_msg: >-
+          Ansible se conecta como root. Aplicar PermitRootLogin no (5.1.20) cortaría este acceso.
+          Conéctate con un usuario nominal + sudo, o agrega 5.1.20 a cis_skip_controls.
+      when:
+        - "'5.1.20' in cis_critical_controls"
+        - "'5.1.20' not in cis_skip_controls"
+      tags: [cis_5.1.20, critical]
+
+    - name: "5.1.6/5.1.12/5.1.15/5.1.23 | Algoritmos soportados por el OpenSSH instalado"
+      ansible.builtin.command:
+        argv: [ssh, -Q, "{{ item }}"]
+      loop: [cipher, kex, mac]
+      register: cis_ssh_q
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+    - name: "5.1.6/5.1.12/5.1.15/5.1.23 | Listas efectivas de algoritmos"
+      ansible.builtin.set_fact:
+        cis_sshd_ciphers_eff: "{{ cis_sshd_ciphers | select('in', cis_ssh_q.results[0].stdout_lines) | list }}"
+        cis_sshd_kex_eff: "{{ cis_sshd_kex | select('in', cis_ssh_q.results[1].stdout_lines) | list }}"
+        cis_sshd_macs_eff: "{{ cis_sshd_macs | select('in', cis_ssh_q.results[2].stdout_lines) | list }}"
+      tags: [always]
+
+    - name: "5.1.23 | Verificar soporte de KEX post-cuántico"
+      ansible.builtin.assert:
+        that: cis_sshd_kex_eff | select('search', 'sntrup761x25519-sha512|mlkem768x25519') | list | length > 0
+        fail_msg: "El OpenSSH instalado no soporta sntrup761x25519-sha512/mlkem768x25519 (requerido por 5.1.23)."
+      when:
+        - "'5.1.23' in cis_critical_controls"
+        - "'5.1.23' not in cis_skip_controls"
+      tags: [cis_5.1.23, critical]
+
+    - name: "5.1.4 | Miembros actuales de sudo/admin"
+      ansible.builtin.getent:
+        database: group
+        fail_key: false
+      tags: [cis_5.1.4, critical]
+
+    - name: "5.1.4 | Calcular usuarios con acceso SSH"
+      ansible.builtin.set_fact:
+        cis_ssh_group_members: >-
+          {{ ([cis_connect_user] + cis_ssh_allowed_users
+              + (((ansible_facts.getent_group.sudo | default([None, None, ''], true))[2] | default('', true) ~ ','
+                  ~ (ansible_facts.getent_group.admin | default([None, None, ''], true))[2] | default('', true)).split(',')
+                 if cis_ssh_allow_sudo_members | bool else [])
+              + (['root'] if ('5.1.20' not in cis_critical_controls or '5.1.20' in cis_skip_controls) else []))
+             | select | unique | list }}
+      tags: [cis_5.1.4, critical]
+
+    - name: "5.1.4 | Grupo de acceso SSH"
+      ansible.builtin.group:
+        name: "{{ cis_ssh_allow_group }}"
+        state: present
+        system: true
+      register: cis_ssh_group_result
+      when:
+        - "'5.1.4' in cis_critical_controls"
+        - "'5.1.4' not in cis_skip_controls"
+      tags: [cis_5.1.4, critical]
+
+    - name: "5.1.4 | Usuarios locales existentes"
+      ansible.builtin.getent:
+        database: passwd
+      tags: [cis_5.1.4, critical]
+
+    - name: "5.1.4 | Agregar usuarios autorizados al grupo SSH"
+      ansible.builtin.user:
+        name: "{{ item }}"
+        groups: "{{ cis_ssh_allow_group }}"
+        append: true
+      loop: "{{ cis_ssh_group_members | select('in', ansible_facts.getent_passwd.keys() | list) | list }}"
+      when:
+        - not (ansible_check_mode and cis_ssh_group_result is changed)
+        - "'5.1.4' in cis_critical_controls"
+        - "'5.1.4' not in cis_skip_controls"
+      tags: [cis_5.1.4, critical]
+
+    - name: "5.1.4 | Registrar usuarios con shell interactiva que pierden acceso SSH"
+      ansible.builtin.set_fact:
+        cis_deferred: "{{ cis_deferred + [{'id': '5.1.4', 'motivo': 'Usuarios con shell válida que NO quedan en el grupo ' ~ cis_ssh_allow_group ~ ' (sin acceso SSH): ' ~ (cis_ssh_lost | join(', ')) ~ '. Agrégalos a cis_ssh_allowed_users si lo requieren.'}] }}"
+      vars:
+        cis_ssh_lost: >-
+          {{ ansible_facts.getent_passwd | dict2items
+             | selectattr('value.5', 'match', '^/(usr/)?bin/(ba|z|k|c|tc|da)?sh$')
+             | map(attribute='key') | reject('in', cis_ssh_group_members + ['root']) | list }}
+      when:
+        - "'5.1.4' in cis_critical_controls"
+        - "'5.1.4' not in cis_skip_controls"
+        - cis_ssh_lost | length > 0
+      tags: [cis_5.1.4, critical]
+
+    - name: "1.6.5/5.1.5-5.1.22 | Drop-in de hardening sshd (validado con sshd -t)"
+      tags: [cis_1.6.5, cis_5.1.4, cis_5.1.5, cis_5.1.6, cis_5.1.7, cis_5.1.10, cis_5.1.11, cis_5.1.12, cis_5.1.13,
+             cis_5.1.14, cis_5.1.15, cis_5.1.16, cis_5.1.17, cis_5.1.18, cis_5.1.19, cis_5.1.20, cis_5.1.21, cis_5.1.22,
+             cis_5.1.23]
+      block:
+        - name: "5.1.x | Publicar drop-in"
+          ansible.builtin.template:
+            src: sshd-cis.conf.j2
+            dest: "{{ cis_sshd_dropin }}"
+            owner: root
+            group: root
+            mode: "0600"
+            backup: true
+          register: cis_sshd_dropin_result
+          notify: CIS reload sshd
+
+        - name: "5.1.x | Validar configuración completa de sshd"
+          ansible.builtin.command: /usr/sbin/sshd -t
+          changed_when: false
+          when: cis_sshd_dropin_result is changed and not ansible_check_mode
+      rescue:
+        - name: "5.1.x | Configuración inválida: restaurar drop-in previo"
+          ansible.builtin.copy:
+            src: "{{ cis_sshd_dropin_result.backup_file }}"
+            dest: "{{ cis_sshd_dropin }}"
+            remote_src: true
+            mode: "0600"
+          when: cis_sshd_dropin_result.backup_file is defined
+
+        - name: "5.1.x | Configuración inválida: retirar drop-in nuevo"
+          ansible.builtin.file:
+            path: "{{ cis_sshd_dropin }}"
+            state: absent
+          when: cis_sshd_dropin_result.backup_file is not defined
+
+        - name: "5.1.x | Detener ejecución"
+          ansible.builtin.fail:
+            msg: "sshd -t falló con el drop-in CIS ({{ ansible_failed_result.stderr | default('') }}). Se revirtió {{ cis_sshd_dropin }}; SSH queda como estaba."
+
+    - name: "5.1.1 | Buscar archivos de configuración de sshd"
+      ansible.builtin.find:
+        paths: /etc/ssh/sshd_config.d
+        file_type: file
+      register: cis_sshd_conf_files
+      check_mode: false
+      tags: [cis_5.1.1]
+
+    - name: "5.1.1 | Permisos de sshd_config y sshd_config.d (root:root, 0600)"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        mode: "u-x,og-rwx"
+      loop: "{{ ['/etc/ssh/sshd_config'] + (cis_sshd_conf_files.files | default([]) | map(attribute='path') | list) }}"
+      when: "'5.1.1' not in cis_skip_controls"
+      tags: [cis_5.1.1]
+
+    - name: "5.1.2/5.1.3 | Buscar llaves de host SSH"
+      ansible.builtin.find:
+        paths: /etc/ssh
+        patterns: ["ssh_host_*_key", "ssh_host_*_key.pub"]
+        file_type: file
+      register: cis_ssh_hostkeys
+      check_mode: false
+      tags: [cis_5.1.2, cis_5.1.3]
+
+    - name: "5.1.2 | Llaves privadas de host (root:root, 0600)"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ cis_ssh_hostkeys.files | default([]) | rejectattr('path', 'search', '\\.pub$') | list }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when: "'5.1.2' not in cis_skip_controls"
+      tags: [cis_5.1.2]
+
+    - name: "5.1.3 | Llaves públicas de host (root:root, 0644)"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: root
+        group: root
+        mode: "u-x,go-wx"
+      loop: "{{ cis_ssh_hostkeys.files | default([]) | selectattr('path', 'search', '\\.pub$') | list }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when: "'5.1.3' not in cis_skip_controls"
+      tags: [cis_5.1.3]
+
+# ---------------------------------------------------------------- 5.2 sudo ----
+- name: "5.2.1 | sudo instalado"
+  ansible.builtin.apt:
+    name: sudo
+    state: present
+  when: "'5.2.1' not in cis_skip_controls"
+  tags: [cis_5.2.1, sudo]
+
+- name: "5.2.2/5.2.3/5.2.6 | Defaults de sudo (validado con visudo)"
+  ansible.builtin.template:
+    src: sudoers-cis.j2
+    dest: /etc/sudoers.d/01-cis-hardening
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  tags: [cis_5.2.2, cis_5.2.3, cis_5.2.6, sudo]
+
+# ---------------------------------------------------------------- 5.3 PAM -----
+- name: "5.3.1.1-5.3.1.4 | Paquetes PAM / pwquality / cracklib instalados"
+  ansible.builtin.apt:
+    name: [libpam-runtime, libpam-modules, libpam-pwquality, cracklib-runtime]
+    state: present
+  when:
+    - "'5.3.1.1' not in cis_skip_controls"
+    - "'5.3.1.3' not in cis_skip_controls"
+  tags: [cis_5.3.1.1, cis_5.3.1.2, cis_5.3.1.3, cis_5.3.1.4, pam]
+
+- name: "5.3.3.1.1/5.3.3.1.2 | faillock.conf: deny y unlock_time"
+  ansible.builtin.lineinfile:
+    path: /etc/security/faillock.conf
+    regexp: "^\\s*#?\\s*{{ item.key }}\\s*="
+    line: "{{ item.key }} = {{ item.value }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { id: "5.3.3.1.1", key: deny, value: "{{ cis_faillock_deny }}" }
+    - { id: "5.3.3.1.2", key: unlock_time, value: "{{ cis_faillock_unlock_time }}" }
+  loop_control:
+    label: "{{ item.id }} {{ item.key }}"
+  when: item.id not in cis_skip_controls
+  tags: [cis_5.3.3.1.1, cis_5.3.3.1.2, pam]
+
+- name: "5.3.3.2.x | Directorio pwquality.conf.d"
+  ansible.builtin.file:
+    path: /etc/security/pwquality.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags: [cis_5.3.3.2.1, cis_5.3.3.2.2, cis_5.3.3.2.3, cis_5.3.3.2.4, cis_5.3.3.2.5, cis_5.3.3.2.6,
+         cis_5.3.3.2.7, cis_5.3.3.2.8, pam]
+
+- name: "5.3.3.2.1-5.3.3.2.8 | Política de calidad de contraseñas"
+  ansible.builtin.template:
+    src: pwquality-cis.conf.j2
+    dest: /etc/security/pwquality.conf.d/60-cis.conf
+    owner: root
+    group: root
+    mode: "0644"
+  tags: [cis_5.3.3.2.1, cis_5.3.3.2.2, cis_5.3.3.2.3, cis_5.3.3.2.4, cis_5.3.3.2.5, cis_5.3.3.2.6,
+         cis_5.3.3.2.7, cis_5.3.3.2.8, pam]
+
+- name: "5.3.3.2.x | Comentar parámetros en conflicto en /etc/security/pwquality.conf"
+  ansible.builtin.replace:
+    path: /etc/security/pwquality.conf
+    regexp: '^(\s*(difok|minlen|minclass|maxrepeat|maxsequence|dictcheck|enforcing)\s*=.*)$'
+    replace: '# CIS-disabled \1'
+  failed_when: false
+  tags: [cis_5.3.3.2.1, cis_5.3.3.2.2, cis_5.3.3.2.3, cis_5.3.3.2.4, cis_5.3.3.2.5, cis_5.3.3.2.6,
+         cis_5.3.3.2.7, pam]
+
+- name: "5.3.3.3.1/5.3.3.3.2 | pwhistory.conf: remember y enforce_for_root"
+  ansible.builtin.lineinfile:
+    path: /etc/security/pwhistory.conf
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { id: "5.3.3.3.1", regexp: '^\s*#?\s*remember\s*=', line: "remember = {{ cis_pwhistory_remember }}" }
+    - { id: "5.3.3.3.2", regexp: '^\s*#?\s*enforce_for_root\s*$', line: "enforce_for_root" }
+  loop_control:
+    label: "{{ item.id }}"
+  when: item.id not in cis_skip_controls
+  tags: [cis_5.3.3.3.1, cis_5.3.3.3.2, pam]
+
+# ---------------------------------------------------------------- 5.4 ---------
+- name: "5.4.1.1/5.4.1.3/5.4.1.4/5.4.3.3 | Parámetros en /etc/login.defs (nuevos usuarios)"
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: "^\\s*{{ item.key }}\\s+"
+    line: "{{ item.key }}\t{{ item.value }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { id: "5.4.1.1", key: PASS_MAX_DAYS, value: "{{ cis_pass_max_days }}" }
+    - { id: "5.4.1.3", key: PASS_WARN_AGE, value: "{{ cis_pass_warn_age }}" }
+    - { id: "5.4.1.4", key: ENCRYPT_METHOD, value: "{{ cis_encrypt_method }}" }
+    - { id: "5.4.3.3", key: UMASK, value: "{{ cis_umask }}" }
+  loop_control:
+    label: "{{ item.id }} {{ item.key }}"
+  when: item.id not in cis_skip_controls
+  tags: [cis_5.4.1.1, cis_5.4.1.3, cis_5.4.1.4, cis_5.4.3.3, login_defs]
+
+- name: "5.4.1.5 | INACTIVE por defecto para nuevos usuarios (useradd -D)"
+  ansible.builtin.lineinfile:
+    path: /etc/default/useradd
+    regexp: '^\s*#?\s*INACTIVE\s*='
+    line: "INACTIVE={{ cis_inactive_days }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+  when: "'5.4.1.5' not in cis_skip_controls"
+  tags: [cis_5.4.1.5, login_defs]
+
+- name: "5.4.1.3 | Usuarios con contraseña y PASS_WARN_AGE menor al requerido"
+  ansible.builtin.shell:
+    cmd: |
+        set -o pipefail
+        awk -F: '($2~/^\$.+\$/) {if($6 < {{ cis_pass_warn_age }}) print $1}' /etc/shadow
+  args:
+    executable: /bin/bash
+  register: cis_warn_users
+  changed_when: false
+  check_mode: false
+  when:
+    - "'5.4.1.3' not in cis_skip_controls"
+    - cis_pass_warn_age_existing_users | bool
+  tags: [cis_5.4.1.3]
+
+- name: "5.4.1.3 | Aplicar aviso de expiración a usuarios existentes (no bloquea cuentas)"
+  ansible.builtin.command:
+    argv: [chage, --warndays, "{{ cis_pass_warn_age }}", "{{ item }}"]
+  changed_when: true
+  loop: "{{ cis_warn_users.stdout_lines | default([]) }}"
+  tags: [cis_5.4.1.3]
+
+- name: "5.4.2.6 | umask de root en /root/.bashrc y /root/.profile (comentar si es débil)"
+  ansible.builtin.replace:
+    path: "{{ item }}"
+    regexp: '^(\s*umask\s+0?[0-7]?([0145][0-7]|[0-7][0-6])\b.*)$'
+    replace: '# CIS-disabled \1'
+  loop: [/root/.bashrc, /root/.profile]
+  failed_when: false
+  when: "'5.4.2.6' not in cis_skip_controls"
+  tags: [cis_5.4.2.6]
+
+- name: "5.4.3.2 | Timeout de shell (TMOUT)"
+  ansible.builtin.template:
+    src: profile-tmout.sh.j2
+    dest: /etc/profile.d/60-cis-tmout.sh
+    owner: root
+    group: root
+    mode: "0644"
+  when: "'5.4.3.2' not in cis_skip_controls"
+  tags: [cis_5.4.3.2]
+
+- name: "5.4.3.3 | Buscar scripts de profile.d"
+  ansible.builtin.find:
+    paths: /etc/profile.d
+    patterns: "*.sh"
+    excludes: "60-cis-*.sh"
+  register: cis_profiled
+  check_mode: false
+  tags: [cis_5.4.3.3]
+
+- name: "5.4.3.3 | Comentar umask débiles en /etc/profile.d/*.sh, /etc/profile y /etc/bash.bashrc"
+  ansible.builtin.replace:
+    path: "{{ item }}"
+    regexp: '^(\s*umask\s+0?[0-7]?([0145][0-7]|[0-7][0-6])\b.*)$'
+    replace: '# CIS-disabled \1'
+  loop: "{{ (cis_profiled.files | default([]) | map(attribute='path') | list) + ['/etc/profile', '/etc/bash.bashrc'] }}"
+  failed_when: false
+  when: "'5.4.3.3' not in cis_skip_controls"
+  tags: [cis_5.4.3.3]
+
+- name: "5.4.3.3 | umask por defecto 027"
+  ansible.builtin.template:
+    src: profile-umask.sh.j2
+    dest: /etc/profile.d/60-cis-umask.sh
+    owner: root
+    group: root
+    mode: "0644"
+  when: "'5.4.3.3' not in cis_skip_controls"
+  tags: [cis_5.4.3.3]

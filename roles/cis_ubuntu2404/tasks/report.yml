@@ -1,0 +1,50 @@
+---
+- name: "REPORTE | Resumen en consola"
+  ansible.builtin.debug:
+    msg:
+      - "Modo: {{ 'CHECK (sin cambios)' if ansible_check_mode else 'APLICACIÓN' }}"
+      - "Controles de revisión manual: {{ cis_manual_report | default([]) | length }} | CUMPLE: {{ cis_manual_report | default([]) | selectattr('estado', 'eq', 'CUMPLE') | list | length }} | REVISAR: {{ cis_manual_report | default([]) | selectattr('estado', 'eq', 'REVISAR') | list | length }} | N/A: {{ cis_manual_report | default([]) | selectattr('estado', 'eq', 'N/A') | list | length }}"
+      - "Controles diferidos en ejecución (no aplicados por seguridad): {{ cis_deferred | default([]) | length }}"
+      - "{{ cis_deferred | default([]) | map(attribute='id') | unique | join(', ') }}"
+
+- name: "REPORTE | Directorio local de reportes"
+  ansible.builtin.file:
+    path: "{{ cis_report_dir }}"
+    state: directory
+    mode: "0750"
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  run_once: true
+
+- name: "REPORTE | Generar reporte Markdown y CSV en el controlador"
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ cis_report_dir }}/{{ inventory_hostname }}_CIS_revision_manual.{{ item.ext }}"
+    mode: "0640"
+  loop:
+    - { src: manual_report.md.j2, ext: md }
+    - { src: manual_report.csv.j2, ext: csv }
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  diff: false
+
+- name: "REPORTE | Directorio de reportes en el host"
+  ansible.builtin.file:
+    path: "{{ cis_report_dir_remote }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  check_mode: false
+
+- name: "REPORTE | Copia del reporte en el host"
+  ansible.builtin.template:
+    src: manual_report.md.j2
+    dest: "{{ cis_report_dir_remote }}/CIS_revision_manual_{{ ansible_facts['date_time']['date'] }}.md"
+    owner: root
+    group: root
+    mode: "0600"
+  check_mode: false
+  diff: false

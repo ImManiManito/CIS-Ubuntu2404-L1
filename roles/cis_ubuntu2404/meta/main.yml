@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: cis_ubuntu2404
+  author: Inntec Medios de Pago - Ciberseguridad
+  description: CIS Ubuntu Linux 24.04 LTS v2.0.0 Level 1 Server (remediación segura + revisión manual)
+  license: proprietary
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+dependencies: []

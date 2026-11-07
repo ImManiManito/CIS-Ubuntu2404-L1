@@ -1,0 +1,113 @@
+---
+- name: "PRECHECK | Validar sistema operativo soportado"
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Ubuntu'
+      - ansible_facts['distribution_major_version'] is version('24', '==')
+    fail_msg: "Este rol está diseñado para Ubuntu 24.04 LTS (detectado: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }})"
+  tags: [always]
+
+- name: "PRECHECK | Paquetes instalados (para condicionar controles)"
+  ansible.builtin.package_facts:
+    manager: apt
+  tags: [always]
+
+- name: "PRECHECK | Refrescar índice de APT (solo listas, no actualiza paquetes)"
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 86400
+  check_mode: false
+  tags: [always]
+
+- name: "PRECHECK | Módulos de kernel cargados"
+  ansible.builtin.command: cat /proc/modules
+  register: cis_proc_modules
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [always]
+
+- name: "PRECHECK | Unidades systemd disponibles"
+  ansible.builtin.command: systemctl list-unit-files --no-legend --no-pager --full  # noqa: command-instead-of-module
+  register: cis_unit_files_raw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [always]
+
+- name: "PRECHECK | Normalizar lista de unidades"
+  ansible.builtin.set_fact:
+    cis_unit_files: "{{ (cis_unit_files_raw.stdout_lines | default([])) | map('split') | map('first') | list }}"
+    cis_systemd: "{{ ansible_facts['service_mgr'] == 'systemd' and (cis_unit_files_raw.rc | default(1)) == 0 }}"
+  tags: [always]
+
+- name: "PRECHECK | Directorios de drop-ins"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /etc/modprobe.d
+    - /etc/sysctl.d
+    - /etc/systemd/coredump.conf.d
+    - /etc/systemd/journald.conf.d
+    - /etc/systemd/timesyncd.conf.d
+    - /etc/profile.d
+    - /etc/security
+  tags: [always]
+
+- name: "PRECHECK | Inicializar acumuladores de reporte"
+  ansible.builtin.set_fact:
+    cis_applied_notes: []
+    cis_deferred: []
+  tags: [always]
+
+- name: "SECCIÓN 1 | Configuración inicial"
+  ansible.builtin.import_tasks: section1.yml
+  tags: [section1]
+
+- name: "SECCIÓN 2 | Servicios"
+  ansible.builtin.import_tasks: section2.yml
+  tags: [section2]
+
+- name: "SECCIÓN 3 | Red"
+  ansible.builtin.import_tasks: section3.yml
+  tags: [section3]
+
+- name: "SECCIÓN 4 | Firewall"
+  ansible.builtin.import_tasks: section4.yml
+  tags: [section4]
+
+- name: "ROLLBACK | Red de seguridad para SSH/PAM"
+  ansible.builtin.import_tasks: rollback_arm.yml
+  tags: [always]
+
+- name: "SECCIÓN 5 | Acceso, autenticación y autorización"
+  ansible.builtin.import_tasks: section5.yml
+  tags: [section5]
+
+- name: "SECCIÓN 6 | Logging y auditoría"
+  ansible.builtin.import_tasks: section6.yml
+  tags: [section6]
+
+- name: "SECCIÓN 7 | Mantenimiento del sistema"
+  ansible.builtin.import_tasks: section7.yml
+  tags: [section7]
+
+- name: "CRÍTICOS | Controles críticos solicitados (cis_critical_controls)"
+  ansible.builtin.import_tasks: critical.yml
+  tags: [critical]
+
+- name: "Aplicar handlers pendientes antes de auditar"
+  ansible.builtin.meta: flush_handlers
+  tags: [always]
+
+- name: "REVISIÓN MANUAL | Auditar controles críticos (solo lectura)"
+  ansible.builtin.import_tasks: manual_review.yml
+  tags: [manual_review, report]
+
+- name: "REPORTE | Generar reporte por host"
+  ansible.builtin.import_tasks: report.yml
+  tags: [manual_review, report]

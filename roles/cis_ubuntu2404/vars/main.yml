@@ -1,0 +1,505 @@
+---
+# =============================================================================
+# Controles de REVISIÓN MANUAL (no se remedian automáticamente).
+# Cada comando es de solo lectura, imprime "ESTADO: CUMPLE" o "ESTADO: REVISAR"
+# en la primera línea y después la evidencia.
+# =============================================================================
+cis_manual_controls:
+
+  # ------------------------------------------------------------- Sección 1 ---
+  - id: "1.1.1.10"
+    titulo: "Ensure usb-storage kernel module is not available"
+    riesgo: "Consolas iLO/iDRAC/IPMI usan virtual media USB; bloquearlo impide montar ISOs o recuperar el servidor."
+    accion: "Si no se usa: crear /etc/modprobe.d/usb-storage.conf con 'install usb-storage /bin/false' y 'blacklist usb-storage'."
+    cmd: |
+      if modprobe -n -v usb-storage 2>/dev/null | grep -q '/bin/false' && ! lsmod | grep -q '^usb_storage'; then echo "ESTADO: CUMPLE"; else echo "ESTADO: REVISAR"; fi
+      echo "--- modprobe -n -v usb-storage"; modprobe -n -v usb-storage 2>&1
+      echo "--- lsmod"; lsmod | grep -i usb_storage || echo "(no cargado)"
+
+  - id: "1.1.1.11"
+    titulo: "Ensure unused filesystems kernel modules are not available"
+    riesgo: "Bloquear un módulo de filesystem en uso puede dejar el sistema sin arrancar (el propio benchmark lo marca como FATAL)."
+    accion: "Revisar la lista de módulos fs disponibles y deshabilitar solo los que no se usan."
+    cmd: |
+      l_search="$(readlink -e /usr/lib/modules/ || readlink -e /lib/modules/)"
+      mounted="$(findmnt -Dkerno fstype | sort -u | tr '\n' ' ')"; loaded="$(lsmod | awk 'NR>1{print $1}' | tr '\n' ' ')"
+      cfg="$(modprobe --showconfig 2>/dev/null | grep -Pi '^\h*(blacklist|install)\h+')"
+      keep=" {{ cis_fs_modules_keep | join(' ') }} "; out=""
+      for f in $(find "$l_search"/*/kernel/fs/ -mindepth 2 -maxdepth 2 -type f ! -path '*/nls/*' 2>/dev/null); do
+        m="$(basename "$f" | cut -d. -f1)"; mu="${m//-/_}"
+        grep -qw -- "$mu" <<< "$mounted $loaded" && continue
+        { grep -Psiq "\binstall\h+${mu}\h+\H+" <<< "$cfg" && grep -Psiq "\bblacklist\h+${mu}\b" <<< "$cfg"; } && continue
+        case "$keep" in *" $m "*|*" $mu "*) out="$out\n  $m (conservado por cis_fs_modules_keep)"; continue;; esac
+        out="$out\n  $m cargable"
+      done
+      echo "$out" | grep -q 'cargable' && echo "ESTADO: REVISAR" || echo "ESTADO: CUMPLE"
+      echo "--- Montados: $mounted"; printf "%b\n" "$out" | sort -u
+
+  - id: "1.1.2.x"
+    titulo: "Particiones separadas y opciones nodev/nosuid/noexec (/tmp, /dev/shm, /home, /var, /var/tmp, /var/log, /var/log/audit)"
+    riesgo: "Requiere reparticionar/editar fstab y reiniciar; noexec en /tmp o /dev/shm rompe instaladores, Oracle, Java, etc."
+    accion: "Planear en ventana: agregar entradas en /etc/fstab con las opciones requeridas (o tmp.mount para /tmp) y 'mount -o remount'."
+    cmd: |
+      fail=0
+      check() { mp="$1"; shift; if ! findmnt -kn "$mp" >/dev/null; then echo "  $mp : NO es partición separada"; fail=1; return; fi
+        opts="$(findmnt -kn -o OPTIONS "$mp")"; for o in "$@"; do echo "$opts" | grep -qw "$o" || { echo "  $mp : falta $o"; fail=1; }; done
+        echo "  $mp : $(findmnt -kn -o SOURCE,FSTYPE,OPTIONS "$mp")"; }
+      out="$(check /tmp nodev nosuid noexec; check /dev/shm nodev nosuid noexec; check /home nodev nosuid; check /var nodev nosuid; check /var/tmp nodev nosuid noexec; check /var/log nodev nosuid noexec; check /var/log/audit nodev nosuid noexec)"
+      echo "$out" | grep -q -E 'NO es|falta' && echo "ESTADO: REVISAR" || echo "ESTADO: CUMPLE"
+      echo "$out"
+
+  - id: "1.2.1.1"
+    titulo: "Ensure the source.list and .source files use the Signed-By option"
+    riesgo: "Cambiar repositorios/llaves puede romper apt y el parchado."
+    accion: "Migrar repositorios a formato deb822 con 'Signed-By:' apuntando a la llave del proveedor."
+    cmd: |
+      bad="$(grep -RHn -E '^\s*deb(-src)?\s' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null | grep -v 'signed-by=')"
+      bad2="$(for f in /etc/apt/sources.list.d/*.sources; do [ -f "$f" ] && ! grep -qi '^Signed-By:' "$f" && echo "$f sin Signed-By"; done 2>/dev/null)"
+      [ -z "$bad$bad2" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$bad"; echo "$bad2"
+
+  - id: "1.2.2.1"
+    titulo: "Ensure updates, patches, and additional security software are installed"
+    riesgo: "Actualizar paquetes y reiniciar debe ir en ventana de cambios."
+    accion: "apt update && apt upgrade en ventana; validar /var/run/reboot-required."
+    cmd: |
+      n="$(apt-get -s upgrade 2>/dev/null | grep -c '^Inst ')"
+      [ "$n" -eq 0 ] && [ ! -f /var/run/reboot-required ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "Paquetes pendientes: $n"; [ -f /var/run/reboot-required ] && echo "Reinicio pendiente: SI" || echo "Reinicio pendiente: NO"
+      apt-get -s upgrade 2>/dev/null | grep '^Inst ' | head -40
+
+  - id: "1.3.1.2"
+    titulo: "Ensure AppArmor is enabled (sin apparmor=0 en GRUB)"
+    riesgo: "Habilitar AppArmor donde se deshabilitó a propósito puede bloquear aplicaciones; requiere reinicio."
+    accion: "Quitar apparmor=0 de GRUB_CMDLINE_LINUX en /etc/default/grub(.d), update-grub y reiniciar."
+    cmd: |
+      g="$(grep -Hs 'apparmor=0' /etc/default/grub /etc/default/grub.d/*.cfg)"
+      en="$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)"
+      [ -z "$g" ] && [ "$en" = "Y" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "AppArmor habilitado en kernel: ${en:-desconocido}"; echo "$g"
+
+  - id: "1.4.1"
+    titulo: "Ensure bootloader password is set"
+    riesgo: "Un error en grub.d puede impedir el arranque desatendido; la contraseña debe resguardarse en bóveda."
+    accion: "grub-mkpasswd-pbkdf2; crear /etc/grub.d/01_password con set superusers y password_pbkdf2; agregar --unrestricted a la entrada por defecto; update-grub."
+    cmd: |
+      if grep -q '^set superusers' /boot/grub/grub.cfg 2>/dev/null && grep -q '^\s*password_pbkdf2' /boot/grub/grub.cfg 2>/dev/null; then echo "ESTADO: CUMPLE"; else echo "ESTADO: REVISAR"; fi
+      grep -E '^set superusers|^\s*password' /boot/grub/grub.cfg 2>/dev/null | sed 's/grub.pbkdf2.*/grub.pbkdf2.(oculto)/'
+
+  # ------------------------------------------------------------- Sección 2 ---
+  - id: "2.1.2"
+    titulo: "Ensure mail transfer agents are configured for local-only mode"
+    riesgo: "Si el host es relay de correo, limitar a loopback detiene la recepción."
+    accion: "postfix: inet_interfaces = loopback-only en /etc/postfix/main.cf y reiniciar postfix."
+    cmd: |
+      l="$(ss -plntu 2>/dev/null | grep -E ':(25|465|587)\s' | grep -Ev '\s(127\.0\.0\.1|\[?::1\]?):')"
+      [ -z "$l" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$l"; postconf -n inet_interfaces 2>/dev/null
+
+  - id: "2.1.4"
+    titulo: "Ensure only approved services are listening on a network interface"
+    riesgo: "Requiere inventario de servicios aprobados por aplicación."
+    accion: "Validar cada puerto contra el inventario; deshabilitar lo no aprobado."
+    cmd: |
+      echo "ESTADO: REVISAR"
+      ss -plntu 2>/dev/null
+
+  - id: "2.3.1.1"
+    titulo: "Ensure a single time synchronization daemon is in use"
+    riesgo: "Desinstalar/enmascarar el demonio equivocado deja el host sin hora (afecta Kerberos, TLS, logs)."
+    accion: "Dejar solo chrony o systemd-timesyncd activo."
+    cmd: |
+      c="$(systemctl is-active chrony 2>/dev/null)"; t="$(systemctl is-active systemd-timesyncd 2>/dev/null)"
+      if [ "$c" = active ] && [ "$t" = active ]; then echo "ESTADO: REVISAR"; elif [ "$c" = active ] || [ "$t" = active ]; then echo "ESTADO: CUMPLE"; else echo "ESTADO: REVISAR"; fi
+      echo "chrony: ${c:-n/a}  systemd-timesyncd: ${t:-n/a}"; timedatectl 2>/dev/null | grep -Ei 'synchron|NTP'
+
+  - id: "2.3.x"
+    titulo: "Servidores NTP autorizados (2.3.2.1 / 2.3.3.1)"
+    riesgo: "Requiere los servidores de tiempo aprobados por la organización."
+    accion: "Definir cis_ntp_servers en group_vars y volver a ejecutar con --tags time."
+    cmd: |
+      if [ "$(systemctl is-active chrony 2>/dev/null)" = active ]; then
+        o="$(grep -RhsE '^\s*(server|pool)\s' /etc/chrony/chrony.conf /etc/chrony/sources.d/ /etc/chrony/conf.d/ 2>/dev/null)"
+      else
+        o="$(grep -RhsE '^\s*(NTP|FallbackNTP)=\S' /etc/systemd/timesyncd.conf /etc/systemd/timesyncd.conf.d/ 2>/dev/null)"
+      fi
+      [ -n "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"; timedatectl show-timesync --property=ServerName --property=ServerAddress 2>/dev/null
+
+  # ------------------------------------------------------------- Sección 3 ---
+  - id: "3.1.1"
+    titulo: "Ensure IPv6 status is identified"
+    riesgo: "Deshabilitar IPv6 sin análisis puede romper servicios que escuchan en ::."
+    accion: "Documentar si IPv6 se usa; si no, deshabilitar vía sysctl o ipv6.disable=1 en GRUB."
+    cmd: |
+      a="$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)"; d="$(sysctl -n net.ipv6.conf.default.disable_ipv6 2>/dev/null)"
+      c="$(grep -o 'ipv6.disable=1' /proc/cmdline)"
+      if [ -n "$c" ] || { [ "$a" = 1 ] && [ "$d" = 1 ]; }; then echo "ESTADO: CUMPLE"; echo "IPv6 deshabilitado"; else echo "ESTADO: REVISAR"; echo "IPv6 habilitado: documentar su uso o definir cis_ipv6_disable=true"; fi
+      echo "all.disable_ipv6=$a default.disable_ipv6=$d cmdline=${c:-no}"
+      ip -6 addr show scope global 2>/dev/null
+
+  - id: "3.1.2"
+    titulo: "Ensure wireless interfaces are not available"
+    riesgo: "Si el equipo depende de Wi-Fi se pierde conectividad."
+    accion: "Bloquear módulos de /lib/modules/$(uname -r)/kernel/drivers/net/wireless en /etc/modprobe.d/."
+    cmd: |
+      w="$(find /sys/class/net/*/ -type d -name wireless 2>/dev/null)"
+      [ -z "$w" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "${w:-(sin interfaces inalámbricas)}"
+
+  - id: "3.3.1.2/3.3.1.3/3.3.2.1/3.3.2.2"
+    titulo: "IP forwarding deshabilitado (IPv4/IPv6)"
+    riesgo: "Docker, Kubernetes, VPN o routers requieren forwarding; apagarlo corta tráfico de contenedores."
+    accion: "Si el host no enruta, fijar =0 en /etc/sysctl.d/60-cis-network.conf (el playbook lo hace solo si ya está en 0)."
+    cmd: |
+      v="$(sysctl -n net.ipv4.conf.all.forwarding net.ipv4.conf.default.forwarding net.ipv6.conf.all.forwarding net.ipv6.conf.default.forwarding 2>/dev/null | sort -u | tr '\n' ' ')"
+      [ "$(echo $v)" = "0" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      sysctl net.ipv4.conf.all.forwarding net.ipv4.conf.default.forwarding net.ipv6.conf.all.forwarding net.ipv6.conf.default.forwarding 2>/dev/null
+      systemctl is-active docker containerd kubelet 2>/dev/null | paste -sd' ' | sed 's/^/docker containerd kubelet: /'
+
+  - id: "3.3.1.12/3.3.1.13"
+    titulo: "net.ipv4.conf.all/default.rp_filter = 1"
+    riesgo: "En servidores multi-homed o con ruteo asimétrico (balanceadores, VPN) rp_filter estricto descarta tráfico legítimo."
+    accion: "Validar topología; si es una sola interfaz/ruta, agregar rp_filter=1 a /etc/sysctl.d/60-cis-network.conf."
+    cmd: |
+      a="$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null)"; d="$(sysctl -n net.ipv4.conf.default.rp_filter 2>/dev/null)"
+      [ "$a" = 1 ] && [ "$d" = 1 ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "all.rp_filter=$a default.rp_filter=$d"; echo "--- Interfaces/rutas:"; ip -4 -br addr; ip -4 route
+
+  - id: "3.3.2.7/3.3.2.8"
+    titulo: "net.ipv6.conf.all/default.accept_ra = 0"
+    riesgo: "Si IPv6 usa SLAAC/router advertisements, se pierde dirección y ruta por defecto IPv6."
+    accion: "Si IPv6 es estático o no se usa, agregar accept_ra=0 a /etc/sysctl.d/60-cis-network.conf."
+    cmd: |
+      a="$(sysctl -n net.ipv6.conf.all.accept_ra 2>/dev/null)"; d="$(sysctl -n net.ipv6.conf.default.accept_ra 2>/dev/null)"
+      if [ -z "$a" ] || { [ "$a" = 0 ] && [ "$d" = 0 ]; }; then echo "ESTADO: CUMPLE"; else echo "ESTADO: REVISAR"; fi
+      echo "all.accept_ra=${a:-n/a (IPv6 deshabilitado)} default.accept_ra=${d:-n/a}"; ip -6 route 2>/dev/null | head
+
+  # ------------------------------------------------------------- Sección 4 ---
+  - id: "4.1.2/4.1.3/4.1.5"
+    titulo: "UFW habilitado con políticas por defecto (incoming deny, routed deny/disabled)"
+    riesgo: "Habilitar UFW o default deny sin reglas previas corta SSH y servicios de aplicación (pérdida total de acceso)."
+    accion: "Primero 'ufw allow' para SSH y puertos aprobados (ver 2.1.4), luego 'ufw default deny incoming', 'ufw default deny routed', 'ufw enable'. Si UFW queda activo, revisar /etc/ufw/sysctl.conf (log_martians=0)."
+    cmd: |
+      s="$(ufw status verbose 2>/dev/null)"
+      echo "$s" | grep -q 'Status: active' && echo "$s" | grep -Eq 'Default:.*deny \(incoming\)' && echo "$s" | grep -Eq '(deny|reject|disabled) \(routed\)' && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "${s:-ufw no instalado}"; systemctl is-enabled ufw 2>/dev/null | sed 's/^/ufw.service enabled: /'
+
+  # ------------------------------------------------------------- Sección 5 ---
+  - id: "5.1.4"
+    titulo: "Ensure sshd access is configured (AllowUsers/AllowGroups/DenyUsers/DenyGroups)"
+    riesgo: "Una lista incompleta bloquea a administradores, cuentas de servicio y automatizaciones (Ansible, backups)."
+    accion: "Crear grupo (ej. ssh-allowed), agregar usuarios y poner 'AllowGroups ssh-allowed' en /etc/ssh/sshd_config.d/01-cis-hardening.conf."
+    cmd: |
+      command -v sshd >/dev/null 2>&1 || { echo "ESTADO: N/A"; echo "openssh-server no instalado"; exit 0; }
+      o="$(sshd -T 2>/dev/null | grep -Ei '^(allowusers|allowgroups|denyusers|denygroups)\s')"
+      [ -n "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "${o:-(sin restricciones de acceso configuradas)}"
+
+  - id: "5.1.6/5.1.12/5.1.15/5.1.23"
+    titulo: "Algoritmos SSH: Ciphers, KexAlgorithms, MACs y KEX post-cuántico"
+    riesgo: "Clientes/appliances antiguos (SFTP de bancos, equipos de red, librerías Java) pueden quedar sin algoritmo común."
+    accion: "Validar clientes y agregar: Ciphers -3des-cbc,aes128-cbc,aes192-cbc,aes256-cbc,chacha20-poly1305@openssh.com / KexAlgorithms -diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1 / MACs -hmac-md5,hmac-md5-96,hmac-ripemd160,hmac-sha1-96,umac-64@openssh.com,hmac-md5-etm@openssh.com,hmac-md5-96-etm@openssh.com,hmac-ripemd160-etm@openssh.com,hmac-sha1-96-etm@openssh.com,umac-64-etm@openssh.com,umac-128-etm@openssh.com"
+    cmd: |
+      command -v sshd >/dev/null 2>&1 || { echo "ESTADO: N/A"; echo "openssh-server no instalado"; exit 0; }
+      t="$(sshd -T 2>/dev/null)"; f=0
+      echo "$t" | grep -i '^ciphers' | grep -Eiq '(3des|blowfish|cast128|aes(128|192|256))-cbc|arcfour|rijndael-cbc|chacha20-poly1305' && f=1
+      echo "$t" | grep -i '^kexalgorithms' | grep -Eiq 'diffie-hellman-group1-sha1|diffie-hellman-group14-sha1|diffie-hellman-group-exchange-sha1' && f=1
+      echo "$t" | grep -i '^kexalgorithms' | grep -q 'sntrup761x25519-sha512' || f=1
+      echo "$t" | grep -i '^macs' | grep -Eiq 'hmac-md5|hmac-ripemd160|hmac-sha1-96|umac-64|umac-128-etm' && f=1
+      [ $f -eq 0 ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$t" | grep -Ei '^(ciphers|kexalgorithms|macs)\s'
+
+  - id: "5.1.20"
+    titulo: "Ensure sshd PermitRootLogin is disabled"
+    riesgo: "Si la administración o automatización entra como root, se pierde el acceso."
+    accion: "Confirmar acceso con usuario nominal + sudo y agregar 'PermitRootLogin no' al drop-in CIS."
+    cmd: |
+      command -v sshd >/dev/null 2>&1 || { echo "ESTADO: N/A"; echo "openssh-server no instalado"; exit 0; }
+      v="$(sshd -T 2>/dev/null | awk '$1=="permitrootlogin"{print $2}')"
+      [ "$v" = no ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "permitrootlogin=$v"; echo "--- Últimos accesos de root:"; last -n 5 root 2>/dev/null | head -5
+
+  - id: "5.2.5"
+    titulo: "Ensure re-authentication for privilege escalation is not disabled globally (!authenticate)"
+    riesgo: "Automatizaciones pueden depender de !authenticate; quitarlo rompe jobs."
+    accion: "Eliminar '!authenticate' de /etc/sudoers y /etc/sudoers.d/* (usar visudo)."
+    cmd: |
+      o="$(grep -rn '^[^#].*!authenticate' /etc/sudoers /etc/sudoers.d/ 2>/dev/null)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  - id: "5.2.7"
+    titulo: "Ensure access to the su command is restricted (pam_wheel)"
+    riesgo: "Modifica /etc/pam.d/su; usuarios y scripts que usan su dejan de funcionar."
+    accion: "groupadd sugroup (vacío) y agregar 'auth required pam_wheel.so use_uid group=sugroup' en /etc/pam.d/su."
+    cmd: |
+      o="$(grep -Pi '^\h*auth\h+(required|requisite)\h+pam_wheel\.so\b' /etc/pam.d/su 2>/dev/null | grep -P '\buse_uid\b' | grep -P '\bgroup=\H+')"
+      [ -n "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "${o:-(pam_wheel no configurado)}"
+
+  - id: "5.3.2.1-5.3.2.4"
+    titulo: "Módulos PAM habilitados: pam_unix, pam_faillock, pam_pwquality, pam_pwhistory"
+    riesgo: "Un perfil PAM mal formado bloquea TODOS los inicios de sesión (incluido root por consola)."
+    accion: "Crear perfiles en /usr/share/pam-configs (faillock, faillock_notify, pwhistory) según el benchmark y aplicar 'pam-auth-update --enable <perfil>' manteniendo una sesión root abierta."
+    cmd: |
+      f=0
+      grep -Pq '\bpam_unix\.so\b' /etc/pam.d/common-auth || f=1
+      grep -Pq '\bpam_faillock\.so\b' /etc/pam.d/common-auth || f=1
+      grep -Pq '\bpam_faillock\.so\b' /etc/pam.d/common-account || f=1
+      grep -Pq '\bpam_pwquality\.so\b' /etc/pam.d/common-password || f=1
+      grep -Pq '\bpam_pwhistory\.so\b' /etc/pam.d/common-password || f=1
+      [ $f -eq 0 ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      grep -HP '\bpam_(unix|faillock|pwquality|pwhistory)\.so\b' /etc/pam.d/common-{auth,account,password,session} 2>/dev/null
+
+  - id: "5.3.3.x (argumentos)"
+    titulo: "Argumentos de módulos PAM en /etc/pam.d/common-* (deny, unlock_time, minlen, remember, enforce_for_root, use_authtok)"
+    riesgo: "Los valores se dejaron en faillock.conf / pwquality.conf.d / pwhistory.conf; argumentos en línea en common-* los sobreescriben."
+    accion: "Quitar argumentos en línea que contradigan los archivos .conf y agregar use_authtok a pam_pwhistory (5.3.3.3.3)."
+    cmd: |
+      o="$(grep -HPn '\bpam_(faillock|pwquality|pwhistory)\.so\b.*\b(deny|unlock_time|difok|minlen|minclass|maxrepeat|maxsequence|dictcheck|enforcing|remember)\s*=' /etc/pam.d/common-* 2>/dev/null)"
+      u="$(grep -HPn '^\h*password\h+[^#\n\r]+\h+pam_pwhistory\.so\b' /etc/pam.d/common-password 2>/dev/null | grep -v use_authtok)"
+      [ -z "$o$u" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"; [ -n "$u" ] && echo "pam_pwhistory sin use_authtok: $u"
+
+  - id: "5.3.3.4.1-5.3.3.4.4"
+    titulo: "pam_unix: sin nullok, sin remember, con yescrypt/sha512 y use_authtok"
+    riesgo: "Quitar nullok bloquea cuentas sin contraseña; editar common-* fuera de pam-auth-update puede romper el login."
+    accion: "Editar /usr/share/pam-configs/unix (quitar nullok) y ejecutar pam-auth-update."
+    cmd: |
+      f=0
+      grep -Pq '^\h*[^#\n\r]+\h+pam_unix\.so\b.*\bnullok\b' /etc/pam.d/common-{password,auth,account,session,session-noninteractive} 2>/dev/null && f=1
+      grep -Pq '^\h*[^#\n\r]+\h+pam_unix\.so\b.*\bremember=\d+\b' /etc/pam.d/common-{password,auth,account,session,session-noninteractive} 2>/dev/null && f=1
+      grep -Pq '^\h*password\h+[^#\n\r]+\h+pam_unix\.so\b.*\b(sha512|yescrypt)\b' /etc/pam.d/common-password || f=1
+      grep -Pq '^\h*password\h+[^#\n\r]+\h+pam_unix\.so\b.*\buse_authtok\b' /etc/pam.d/common-password || f=1
+      [ $f -eq 0 ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      grep -HP '\bpam_unix\.so\b' /etc/pam.d/common-* 2>/dev/null
+
+  - id: "5.4.1.1"
+    titulo: "PASS_MAX_DAYS aplicado a usuarios existentes"
+    riesgo: "chage --maxdays a cuentas con contraseña antigua las expira de inmediato (cuentas de servicio y apps)."
+    accion: "Revisar la lista y aplicar 'chage --maxdays 365 <usuario>' solo a cuentas humanas."
+    cmd: |
+      o="$(awk -F: '($2~/^\$.+\$/) {if($5 > 365 || $5 < 1) print "  " $1 " PASS_MAX_DAYS=" $5}' /etc/shadow)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  - id: "5.4.1.5"
+    titulo: "INACTIVE aplicado a usuarios existentes"
+    riesgo: "Cuentas con contraseña expirada se bloquean tras 45 días."
+    accion: "Aplicar 'chage --inactive 45 <usuario>' a cuentas humanas."
+    cmd: |
+      o="$(awk -F: '($2~/^\$.+\$/) {if($7 > 45 || $7 < 0) print "  " $1 " INACTIVE=" $7}' /etc/shadow)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  - id: "5.4.1.6"
+    titulo: "Ensure all users last password change date is in the past"
+    riesgo: "Fechas futuras indican manipulación o reloj erróneo; forzar cambio puede bloquear cuentas."
+    accion: "Investigar cada cuenta y forzar cambio de contraseña (passwd -e)."
+    cmd: |
+      now=$(( $(date +%s) / 86400 ))
+      o="$(awk -F: -v n=$now '($2~/^\$.+\$/ && $3 > n) {print "  " $1 " lastchg=" $3}' /etc/shadow)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  - id: "5.4.2.1/5.4.2.2/5.4.2.3"
+    titulo: "root es la única cuenta con UID 0 / GID 0 y el grupo root el único con GID 0"
+    riesgo: "Cambiar UID/GID de cuentas en uso rompe propiedad de archivos y servicios."
+    accion: "Investigar cuentas adicionales con UID/GID 0 (posible backdoor) y corregir."
+    cmd: |
+      u="$(awk -F: '($3 == 0 && $1 != "root") {print "  UID0: " $1}' /etc/passwd)"
+      g="$(awk -F: '($1 !~ /^(sync|shutdown|halt|operator|root)$/ && $4 == 0) {print "  GID0: " $1}' /etc/passwd)"
+      gr="$(awk -F: '($3 == 0 && $1 != "root") {print "  Grupo GID0: " $1}' /etc/group)"
+      [ -z "$u$g$gr" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$u"; echo "$g"; echo "$gr"
+
+  - id: "5.4.2.4"
+    titulo: "Ensure root account access is controlled (contraseña o bloqueada)"
+    riesgo: "Bloquear root o cambiar su contraseña puede impedir recuperación por consola."
+    accion: "Definir contraseña de root resguardada en bóveda (passwd root) o bloquearla (usermod -L root)."
+    cmd: |
+      s="$(passwd -S root 2>/dev/null | awk '{print $2}')"
+      case "$s" in P|L) echo "ESTADO: CUMPLE";; *) echo "ESTADO: REVISAR";; esac
+      echo "Estado de root (passwd -S): ${s:-desconocido} (P=contraseña, L=bloqueada, NP=sin contraseña)"
+
+  - id: "5.4.2.5"
+    titulo: "Ensure root path integrity"
+    riesgo: "Cambiar el PATH de root afecta scripts de administración."
+    accion: "Quitar entradas vacías, '.', y directorios con permisos de escritura de grupo/otros del PATH de root."
+    cmd: |
+      l_root_path="$(sudo su - root -c env 2>/dev/null | awk -F= '$1=="PATH"{print $2}')"; o=""
+      grep -q -- "::" <<< "$l_root_path" && o="$o\n  PATH contiene ::"
+      grep -Pq -- ":\h*$" <<< "$l_root_path" && o="$o\n  PATH termina en :"
+      grep -Pq -- '(^\h*|:)\.(:|\h*$)' <<< "$l_root_path" && o="$o\n  PATH contiene ."
+      IFS=":" read -ra a <<< "$l_root_path"
+      for d in "${a[@]}"; do
+        if [ -d "$d" ]; then m=$(stat -Lc '%#a' "$d"); u=$(stat -Lc '%U' "$d"); [ "$u" != root ] && o="$o\n  $d dueño $u"; [ $(( m & 022 )) -gt 0 ] && o="$o\n  $d modo $m"; else o="$o\n  $d no es directorio"; fi
+      done
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "PATH root (sudo su - root -c env): $l_root_path"; printf "%b\n" "$o"
+
+  - id: "5.4.2.7"
+    titulo: "Ensure system accounts do not have a valid login shell"
+    riesgo: "Cuentas de servicio usadas por aplicaciones/backups (rsync, ssh, su - usuario) dejan de funcionar."
+    accion: "usermod -s $(command -v nologin) <cuenta> para cada cuenta de sistema no interactiva."
+    cmd: |
+      vs="^($(awk -F/ '$NF != "nologin"' /etc/shells | grep '^/' | paste -sd'|' -))$"
+      umin=$(awk '/^\s*UID_MIN/{print $2}' /etc/login.defs)
+      o="$(awk -v pat="$vs" -v umin="$umin" -F: '($1!~/^(root|halt|sync|shutdown|nfsnobody)$/ && ($3<umin || $3 == 65534) && $(NF) ~ pat) {print "  " $1 " shell=" $(NF)}' /etc/passwd)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  - id: "5.4.2.8"
+    titulo: "Ensure accounts without a valid login shell are locked"
+    riesgo: "Bloquear cuentas usadas por servicios con autenticación por contraseña rompe integraciones."
+    accion: "usermod -L <cuenta> para cada cuenta listada."
+    cmd: |
+      vs="^($(awk -F/ '$NF != "nologin"' /etc/shells | grep '^/' | paste -sd'|' -))$"
+      o="$(awk -v pat="$vs" -F: '($1 != "root" && $(NF) !~ pat) {print $1}' /etc/passwd | while read -r u; do passwd -S "$u" 2>/dev/null | awk '$2 !~ /^L/ {print "  " $1 " (" $2 ")"}'; done)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  # ------------------------------------------------------------- Sección 6 ---
+  - id: "6.1.1.1.4"
+    titulo: "Ensure journald log file access is configured"
+    riesgo: "Cambiar tmpfiles de systemd afecta lectura de logs por grupos adm/systemd-journal."
+    accion: "Si se requiere, copiar /usr/lib/tmpfiles.d/systemd.conf a /etc/tmpfiles.d/ y ajustar a 0640."
+    cmd: |
+      o="$(find /var/log/journal -type f \( -name '*.journal' -o -name '*.journal~' \) -perm /0137 2>/dev/null | head -20)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"; grep -Hs -E '^[a-zA-Z].*(/var/log/journal|/run/log/journal)' /etc/tmpfiles.d/systemd.conf /usr/lib/tmpfiles.d/systemd.conf
+
+  - id: "6.1.2.5"
+    titulo: "Ensure rsyslog is configured to send logs to a remote log host"
+    riesgo: "Requiere el servidor SIEM/colector aprobado."
+    accion: "Definir cis_rsyslog_remote_host en group_vars y ejecutar con --tags cis_6.1.2.5."
+    cmd: |
+      command -v rsyslogd >/dev/null 2>&1 || { echo "ESTADO: N/A"; echo "rsyslog no instalado"; exit 0; }
+      o="$(grep -RhsE '^\s*([^#]+\s+)?action\(([^#]+\s+)?\btarget=|^\s*[^#]+\s+@@?[^ ]+' /etc/rsyslog.conf /etc/rsyslog.d/)"
+      [ -n "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "${o:-(sin destino remoto)}"
+
+  - id: "6.1.2.6"
+    titulo: "Ensure rsyslog is not configured to receive logs from a remote client"
+    riesgo: "Si el host es colector de logs, quitar imtcp/imudp detiene la recepción."
+    accion: "Comentar module(load=\"imtcp\")/input(type=\"imtcp\") o $ModLoad imtcp/$InputTCPServerRun en hosts que no son colectores."
+    cmd: |
+      command -v rsyslogd >/dev/null 2>&1 || { echo "ESTADO: N/A"; echo "rsyslog no instalado"; exit 0; }
+      o="$(grep -RHsnE '^\s*(module\(load="im(tcp|udp)"\)|input\(type="im(tcp|udp)"|\$ModLoad\s+im(tcp|udp)|\$(InputTCPServerRun|UDPServerRun))' /etc/rsyslog.conf /etc/rsyslog.d/)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  # ------------------------------------------------------------- Sección 7 ---
+  - id: "7.1.11"
+    titulo: "Ensure world writable files and directories are secured"
+    riesgo: "Quitar o+w o agregar sticky bit en directorios de aplicaciones puede romperlas."
+    accion: "chmod o-w a archivos listados; chmod a+t a directorios world-writable."
+    cmd: |
+      a_path=(-path "*/containers/storage/*" -o -path "*/containerd/*" -o -path "*/kubelet/*" -o -path "/sys/*" -o -path "/snap/*" -o -path "/boot/efi/*")
+      o="$(findmnt -Dkerno fstype,target | awk '($1 !~ /^\s*(nfs|proc|cifs|smb|vfat|iso9660|efivarfs|selinuxfs|ncpfs)/ && $2 !~ /^(\/run|\/tmp|\/var\/tmp)(\/|$)/){print $2}' | while read -r mp; do
+        timeout {{ cis_find_timeout }} find "$mp" -mount -xdev \( "${a_path[@]}" \) -prune -o \( -type f -perm -0002 -print \) -o \( -type d -perm -0002 ! -perm -1000 -print \) 2>/dev/null
+      done | head -200)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  - id: "7.1.12"
+    titulo: "Ensure no files or directories without an owner and a group exist"
+    riesgo: "Asignar dueño incorrecto expone datos o rompe aplicaciones."
+    accion: "Asignar dueño/grupo correcto o eliminar archivos huérfanos tras análisis."
+    cmd: |
+      ex="$(printf -- '-fstype %s -o ' {{ cis_find_exclude_fstypes | join(' ') }})"
+      o="$(timeout {{ cis_find_timeout }} find / \( $ex -path /proc -o -path /sys -o -path /run -o -path /snap -o -path '/var/lib/docker' -o -path '/var/lib/containerd' \) -prune -o \( -nouser -o -nogroup \) -print 2>/dev/null | head -200)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  - id: "7.1.13"
+    titulo: "Ensure SUID and SGID files are reviewed"
+    riesgo: "Quitar SUID/SGID a binarios del sistema (passwd, sudo, ping) rompe funcionalidades."
+    accion: "Comparar contra línea base y validar con 'dpkg -S' que cada binario pertenece a un paquete."
+    cmd: |
+      echo "ESTADO: REVISAR"
+      ex="$(printf -- '-fstype %s -o ' {{ cis_find_exclude_fstypes | join(' ') }})"
+      timeout {{ cis_find_timeout }} find / \( $ex -path /proc -o -path /sys -o -path /run -o -path /snap \) -prune -o -type f \( -perm -4000 -o -perm -2000 \) -print 2>/dev/null | while read -r f; do p="$(dpkg -S "$f" 2>/dev/null | cut -d: -f1)"; echo "  $(stat -c '%A %U:%G' "$f") $f [${p:-SIN PAQUETE}]"; done | head -200
+
+  - id: "7.2.1"
+    titulo: "Ensure accounts in /etc/passwd use shadowed passwords"
+    riesgo: "pwconv modifica todas las cuentas."
+    accion: "Ejecutar pwconv tras investigar."
+    cmd: |
+      o="$(awk -F: '($2 != "x") {print "  " $1}' /etc/passwd)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  - id: "7.2.2"
+    titulo: "Ensure /etc/shadow password fields are not empty"
+    riesgo: "Bloquear cuentas sin contraseña puede afectar servicios."
+    accion: "passwd -l <usuario> o asignar contraseña."
+    cmd: |
+      o="$(awk -F: '($2 == "") {print "  " $1}' /etc/shadow)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  - id: "7.2.3"
+    titulo: "Ensure all groups in /etc/passwd exist in /etc/group"
+    riesgo: "Corregir GIDs afecta permisos de archivos."
+    accion: "Crear el grupo faltante o corregir el GID del usuario."
+    cmd: |
+      o="$(for g in $(cut -s -d: -f4 /etc/passwd | sort -u); do grep -q -P "^.*?:[^:]*:$g:" /etc/group || echo "  GID $g usado por: $(awk -F: -v g=$g '$4==g{print $1}' /etc/passwd | paste -sd,)"; done)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  - id: "7.2.4"
+    titulo: "Ensure shadow group is empty"
+    riesgo: "Quitar miembros del grupo shadow puede romper aplicaciones que leen /etc/shadow."
+    accion: "sed -ri 's/(^shadow:[^:]*:[^:]*:)([^:]+$)/\\1/' /etc/group y corregir usuarios con GID primario shadow."
+    cmd: |
+      m="$(awk -F: '($1=="shadow") {print $NF}' /etc/group)"
+      sg="$(getent group shadow | cut -d: -f3)"; p="$(awk -F: -v g="$sg" '($4==g) {print $1}' /etc/passwd)"
+      [ -z "$m$p" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "Miembros: ${m:-ninguno}  GID primario shadow: ${p:-ninguno}"
+
+  - id: "7.2.5/7.2.6/7.2.7/7.2.8"
+    titulo: "Sin UIDs, GIDs, nombres de usuario ni nombres de grupo duplicados"
+    riesgo: "Corregir duplicados cambia la propiedad efectiva de archivos."
+    accion: "Asignar IDs/nombres únicos y reasignar propiedad de archivos."
+    cmd: |
+      o=""
+      d="$(cut -d: -f3 /etc/passwd | sort -n | uniq -d)"; [ -n "$d" ] && o="$o\n  UID duplicados: $d"
+      d="$(cut -d: -f3 /etc/group | sort -n | uniq -d)"; [ -n "$d" ] && o="$o\n  GID duplicados: $d"
+      d="$(cut -d: -f1 /etc/passwd | sort | uniq -d)"; [ -n "$d" ] && o="$o\n  Usuarios duplicados: $d"
+      d="$(cut -d: -f1 /etc/group | sort | uniq -d)"; [ -n "$d" ] && o="$o\n  Grupos duplicados: $d"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      printf "%b\n" "$o"
+
+  - id: "7.2.9"
+    titulo: "Ensure local interactive user home directories are configured (existe, dueño correcto, <=0750)"
+    riesgo: "Cambiar permisos de homes rompe accesos compartidos (web ~/public_html, grupos de proyecto)."
+    accion: "chown <user> <home> y chmod g-w,o-rwx <home> tras validar con el dueño."
+    cmd: |
+      vs="^($(awk -F/ '$NF != "nologin"' /etc/shells | grep '^/' | paste -sd'|' -))$"
+      o="$(awk -v pat="$vs" -F: '$(NF) ~ pat {print $1 " " $(NF-1)}' /etc/passwd | while read -r u h; do
+        if [ ! -d "$h" ]; then echo "  $u: home $h no existe"; continue; fi
+        ow="$(stat -Lc '%U' "$h")"; m="$(stat -Lc '%#a' "$h")"
+        [ "$ow" != "$u" ] && echo "  $u: home $h pertenece a $ow"
+        [ $(( m & 0027 )) -gt 0 ] && echo "  $u: home $h modo $m"
+      done)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"
+
+  - id: "7.2.10"
+    titulo: "Ensure local interactive user dot files access is configured"
+    riesgo: "Eliminar .forward/.rhosts/.netrc o cambiar permisos de dotfiles rompe flujos de usuarios/aplicaciones."
+    accion: "Eliminar .forward/.rhosts, revisar .netrc, chmod 600 a .bash_history/.netrc y g-w,o-w al resto."
+    cmd: |
+      vs="^($(awk -F/ '$NF != "nologin"' /etc/shells | grep '^/' | paste -sd'|' -))$"
+      o="$(awk -v pat="$vs" -F: '$(NF) ~ pat {print $1 " " $(NF-1)}' /etc/passwd | while read -r u h; do
+        [ -d "$h" ] || continue
+        find "$h" -xdev -maxdepth 1 -name '.*' -type f 2>/dev/null | while read -r f; do
+          b="$(basename "$f")"; m="$(stat -Lc '%#a' "$f")"; ow="$(stat -Lc '%U' "$f")"
+          case "$b" in .forward|.rhosts) echo "  $f existe (debe eliminarse)";; .netrc) [ $(( m & 0177 )) -gt 0 ] && echo "  $f modo $m (máx 0600)";; .bash_history) [ $(( m & 0177 )) -gt 0 ] && echo "  $f modo $m (máx 0600)";; *) [ $(( m & 0133 )) -gt 0 ] && echo "  $f modo $m (máx 0644)";; esac
+          [ "$ow" != "$u" ] && echo "  $f pertenece a $ow"
+        done
+      done)"
+      [ -z "$o" ] && echo "ESTADO: CUMPLE" || echo "ESTADO: REVISAR"
+      echo "$o"

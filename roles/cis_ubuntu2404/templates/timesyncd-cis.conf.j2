@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# CIS 2.3.2.1 - Servidores de tiempo autorizados
+[Time]
+NTP={{ cis_ntp_servers | join(' ') }}
+{% if cis_ntp_fallback_servers | length > 0 %}
+FallbackNTP={{ cis_ntp_fallback_servers | join(' ') }}
+{% endif %}

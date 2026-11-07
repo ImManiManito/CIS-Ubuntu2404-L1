@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+# CIS Ubuntu 24.04 v2.0.0 L1 - sudo
+{% if '5.2.2' not in cis_skip_controls %}
+# CIS 5.2.2
+Defaults use_pty
+{% endif %}
+{% if '5.2.3' not in cis_skip_controls %}
+# CIS 5.2.3
+Defaults logfile="{{ cis_sudo_logfile }}"
+{% endif %}
+{% if '5.2.6' not in cis_skip_controls %}
+# CIS 5.2.6
+Defaults timestamp_timeout={{ cis_sudo_timestamp_timeout }}
+{% endif %}

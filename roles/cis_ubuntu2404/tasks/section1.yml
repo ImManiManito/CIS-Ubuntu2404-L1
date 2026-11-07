@@ -1,0 +1,441 @@
+---
+# =============================================================================
+# SECCIÓN 1 - Configuración inicial
+# Excluidos (revisión manual): 1.1.1.10, 1.1.1.11, 1.1.2.x, 1.2.1.1, 1.2.2.1,
+#                               1.3.1.2 (si hay apparmor=0 en GRUB), 1.4.1
+# =============================================================================
+
+# ---------------------------------------------------------------- 1.1.1 -------
+- name: "1.1.1.x | Calcular módulos de kernel cargados"
+  ansible.builtin.set_fact:
+    cis_loaded_modules: "{{ cis_proc_modules.stdout_lines | default([]) | map('split') | map('first') | list }}"
+  tags: [always]
+
+- name: "1.1.1.1-1.1.1.5, 1.1.1.9 | Deshabilitar módulos de filesystem/firewire no requeridos"
+  ansible.builtin.copy:
+    dest: "/etc/modprobe.d/cis-{{ item.mod }}.conf"
+    content: |
+      # CIS {{ item.id }} - Gestionado por Ansible
+      install {{ item.mod }} /bin/false
+      blacklist {{ item.mod }}
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ cis_kernel_modules_fs }}"
+  loop_control:
+    label: "{{ item.id }} {{ item.mod }}"
+  when:
+    - item.id not in cis_skip_controls
+    - not (cis_modules_skip_if_loaded | bool and (item.mod | replace('-', '_')) in cis_loaded_modules)
+  tags: [cis_1.1.1.1, cis_1.1.1.2, cis_1.1.1.3, cis_1.1.1.4, cis_1.1.1.5, cis_1.1.1.9, kernel_modules]
+
+- name: "1.1.1.x | Registrar módulos cargados que no se bloquearon"
+  ansible.builtin.set_fact:
+    cis_deferred: "{{ cis_deferred + [{'id': item.id, 'motivo': 'Módulo ' ~ item.mod ~ ' está cargado (en uso); no se bloqueó. Validar si es requerido.'}] }}"
+  loop: "{{ cis_kernel_modules_fs }}"
+  loop_control:
+    label: "{{ item.id }} {{ item.mod }}"
+  when:
+    - item.id not in cis_skip_controls
+    - cis_modules_skip_if_loaded | bool
+    - (item.mod | replace('-', '_')) in cis_loaded_modules
+  tags: [cis_1.1.1.1, cis_1.1.1.2, cis_1.1.1.3, cis_1.1.1.4, cis_1.1.1.5, cis_1.1.1.9, kernel_modules]
+
+# ---------------------------------------------------------------- 1.2.1 -------
+- name: "1.2.1.3 | Buscar llaves GPG de APT"
+  ansible.builtin.find:
+    paths: [/etc/apt/trusted.gpg.d, /usr/share/keyrings, /etc/apt/keyrings]
+    patterns: ["*.gpg", "*.asc"]
+    file_type: file
+  register: cis_apt_keys
+  check_mode: false
+  when: "'1.2.1.3' not in cis_skip_controls"
+  tags: [cis_1.2.1.3, apt]
+
+- name: "1.2.1.3 | Permisos de llaves GPG (root:root, u-x,go-wx)"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: root
+    mode: "u-x,go-wx"
+  loop: "{{ cis_apt_keys.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when: "'1.2.1.3' not in cis_skip_controls"
+  tags: [cis_1.2.1.3, apt]
+
+- name: "1.2.1.4/1.2.1.5/1.2.1.7/1.2.1.8 | Permisos de directorios de APT (root:root, <=0755)"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "go-w"
+  loop:
+    - { id: "1.2.1.4", path: /etc/apt/trusted.gpg.d }
+    - { id: "1.2.1.5", path: /etc/apt/auth.conf.d }
+    - { id: "1.2.1.7", path: /usr/share/keyrings }
+    - { id: "1.2.1.8", path: /etc/apt/sources.list.d }
+  loop_control:
+    label: "{{ item.id }} {{ item.path }}"
+  when: item.id not in cis_skip_controls
+  tags: [cis_1.2.1.4, cis_1.2.1.5, cis_1.2.1.7, cis_1.2.1.8, apt]
+
+- name: "1.2.1.6/1.2.1.9 | Buscar archivos en auth.conf.d y sources.list.d"
+  ansible.builtin.find:
+    paths: "{{ item }}"
+    file_type: file
+  loop: [/etc/apt/auth.conf.d, /etc/apt/sources.list.d]
+  register: cis_apt_files
+  check_mode: false
+  tags: [cis_1.2.1.6, cis_1.2.1.9, apt]
+
+- name: "1.2.1.6 | Archivos en /etc/apt/auth.conf.d (root:root, <=0640)"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: root
+    mode: "u-x,g-wx,o-rwx"
+  loop: "{{ cis_apt_files.results[0].files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when: "'1.2.1.6' not in cis_skip_controls"
+  tags: [cis_1.2.1.6, apt]
+
+- name: "1.2.1.9 | Archivos en /etc/apt/sources.list.d (root:root, <=0644)"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: root
+    mode: "u-x,go-wx"
+  loop: "{{ cis_apt_files.results[1].files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when: "'1.2.1.9' not in cis_skip_controls"
+  tags: [cis_1.2.1.9, apt]
+
+# ---------------------------------------------------------------- 1.3.1 -------
+- name: "1.3.1.1 | Instalar AppArmor"
+  ansible.builtin.apt:
+    name: [apparmor, apparmor-utils]
+    state: present
+  when: "'1.3.1.1' not in cis_skip_controls"
+  tags: [cis_1.3.1.1, apparmor]
+
+- name: "1.3.1.2 | Servicio AppArmor habilitado"
+  ansible.builtin.systemd_service:
+    name: apparmor.service
+    enabled: true
+  when:
+    - "'1.3.1.2' not in cis_skip_controls"
+    - ansible_facts['service_mgr'] == 'systemd'
+  ignore_errors: "{{ ansible_check_mode }}"
+  tags: [cis_1.3.1.2, apparmor]
+
+# ---------------------------------------------------------------- 1.4 ---------
+- name: "1.4.2 | Verificar grub.cfg"
+  ansible.builtin.stat:
+    path: /boot/grub/grub.cfg
+  register: cis_grub_cfg
+  tags: [cis_1.4.2, bootloader]
+
+- name: "1.4.2 | Permisos de /boot/grub/grub.cfg (root:root, <=0600)"
+  ansible.builtin.file:
+    path: /boot/grub/grub.cfg
+    owner: root
+    group: root
+    mode: "u-x,go-rwx"
+  when:
+    - "'1.4.2' not in cis_skip_controls"
+    - cis_grub_cfg.stat.exists
+  tags: [cis_1.4.2, bootloader]
+
+# ---------------------------------------------------------------- 1.3.1.4 / 1.5 (sysctl kernel)
+- name: "1.3.1.4/1.5.x | Definir parámetros sysctl de kernel"
+  ansible.builtin.set_fact:
+    cis_sysctl_kernel: >-
+      {{ [
+          {'id': '1.3.1.4', 'key': 'kernel.apparmor_restrict_unprivileged_unconfined', 'value': '1', 'enabled': cis_apparmor_restrict_unprivileged_unconfined | bool},
+          {'id': '1.5.1', 'key': 'fs.protected_hardlinks', 'value': '1', 'enabled': true},
+          {'id': '1.5.3', 'key': 'kernel.yama.ptrace_scope', 'value': '1', 'allow': '(1|2|3)', 'enabled': true},
+          {'id': '1.5.4', 'key': 'fs.suid_dumpable', 'value': '0', 'enabled': true},
+          {'id': '1.5.5', 'key': 'kernel.dmesg_restrict', 'value': '1', 'enabled': true},
+          {'id': '1.5.8', 'key': 'kernel.kptr_restrict', 'value': '2', 'allow': '(1|2)', 'enabled': true},
+          {'id': '1.5.9', 'key': 'kernel.randomize_va_space', 'value': '2', 'enabled': true}
+        ] | selectattr('enabled') | rejectattr('id', 'in', cis_skip_controls) | list }}
+  tags: [always]
+
+- name: "1.3.1.4/1.5.1/1.5.3/1.5.4/1.5.5/1.5.8/1.5.9 | Drop-in sysctl de kernel"
+  ansible.builtin.template:
+    src: sysctl-cis.conf.j2
+    dest: /etc/sysctl.d/60-cis-kernel.conf
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    cis_sysctl_items: "{{ cis_sysctl_kernel }}"
+    cis_sysctl_title: "Parámetros de kernel (secciones 1.3 y 1.5)"
+  notify: CIS reload sysctl
+  tags: [cis_1.3.1.4, cis_1.5.1, cis_1.5.3, cis_1.5.4, cis_1.5.5, cis_1.5.8, cis_1.5.9, sysctl]
+
+- name: "1.5.x | Comentar valores sysctl de kernel en conflicto en otros archivos"
+  ansible.builtin.script:
+    cmd: >-
+      cis_sysctl_fix.sh {{ 'check' if ansible_check_mode else 'fix' }} /etc/sysctl.d/60-cis-kernel.conf
+      {% for i in cis_sysctl_kernel %}'{{ i.key }}={{ i.allow | default(i.value) }}' {% endfor %}
+    executable: /bin/bash
+  register: cis_sysctl_kernel_fix
+  changed_when: "'RESULT=changed' in cis_sysctl_kernel_fix.stdout"
+  check_mode: false
+  when: cis_sysctl_kernel | length > 0
+  notify: CIS reload sysctl
+  tags: [cis_1.3.1.4, cis_1.5.1, cis_1.5.3, cis_1.5.4, cis_1.5.5, cis_1.5.8, cis_1.5.9, sysctl]
+
+- name: "1.5.x | Registrar valores sysctl en conflicto en archivos de paquete (/usr/lib/sysctl.d)"
+  ansible.builtin.set_fact:
+    cis_deferred: "{{ cis_deferred + [{'id': '1.5.x', 'motivo': item | regex_replace('^WARN ', '')}] }}"
+  loop: "{{ cis_sysctl_kernel_fix.stdout_lines | default([]) | select('match', '^WARN ') | list }}"
+  tags: [sysctl]
+
+- name: "1.5.6 | Desinstalar prelink"
+  ansible.builtin.apt:
+    name: prelink
+    state: absent
+    purge: true
+  when: "'1.5.6' not in cis_skip_controls"
+  tags: [cis_1.5.6]
+
+- name: "1.5.7 | Deshabilitar Apport (reporte automático de errores)"
+  when:
+    - "'1.5.7' not in cis_skip_controls"
+    - cis_disable_apport | bool
+    - "'apport' in ansible_facts.packages"
+  tags: [cis_1.5.7]
+  block:
+    - name: "1.5.7 | enabled=0 en /etc/default/apport"
+      ansible.builtin.lineinfile:
+        path: /etc/default/apport
+        regexp: '^\s*enabled\s*='
+        line: enabled=0
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: "1.5.7 | Detener y enmascarar apport.service"
+      ansible.builtin.systemd_service:
+        name: apport.service
+        state: stopped
+        masked: true
+      when: ansible_facts['service_mgr'] == 'systemd'
+      ignore_errors: "{{ ansible_check_mode }}"
+
+- name: "1.5.10/1.5.11/1.5.13 | systemd-coredump: ProcessSizeMax=0 y Storage=none"
+  ansible.builtin.copy:
+    dest: /etc/systemd/coredump.conf.d/60-coredump.conf
+    content: |
+      # CIS 1.5.10 / 1.5.11 / 1.5.13 - Gestionado por Ansible
+      [Coredump]
+      ProcessSizeMax=0
+      Storage=none
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - "'1.5.10' not in cis_skip_controls"
+    - "'1.5.11' not in cis_skip_controls"
+  tags: [cis_1.5.10, cis_1.5.11, cis_1.5.13, coredump]
+
+# ---------------------------------------------------------------- 1.6 ---------
+- name: "1.6.1 | /etc/motd con banner corporativo"
+  ansible.builtin.copy:
+    dest: /etc/motd
+    content: "{{ cis_banner_text }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when: "'1.6.1' not in cis_skip_controls"
+  tags: [cis_1.6.1, cis_1.6.6, banner]
+
+- name: "1.6.1/1.6.4 | Detectar scripts de MOTD dinámico con referencias al SO (contenido o salida)"
+  ansible.builtin.shell:  # noqa: risky-shell-pipe
+    cmd: |
+      os_id="$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')"
+      re="(\\\\v|\\\\r|\\\\m|\\\\s|\\b${os_id}\\b)"
+      for f in /etc/update-motd.d/*; do
+        [ -f "$f" ] || continue
+        if grep -Piqs -- "$re" "$f"; then echo "$f"; continue; fi
+        if [ -x "$f" ] && timeout 15 "$f" 2>/dev/null | grep -Piq -- "$re"; then echo "$f"; fi
+      done
+  args:
+    executable: /bin/bash
+  register: cis_motd_scripts
+  changed_when: false
+  check_mode: false
+  when:
+    - "'1.6.1' not in cis_skip_controls"
+    - cis_motd_disable_dynamic | bool
+  tags: [cis_1.6.1, cis_1.6.4, banner]
+
+- name: "1.6.1/1.6.4 | Crear directorio de respaldo de MOTD dinámico"
+  ansible.builtin.file:
+    path: /etc/update-motd.d.cis-disabled
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - cis_motd_scripts.stdout_lines | default([]) | length > 0
+  tags: [cis_1.6.1, cis_1.6.4, banner]
+
+- name: "1.6.1/1.6.4 | Mover scripts de MOTD dinámico (reversible)"
+  ansible.builtin.command:
+    cmd: "mv -f {{ item | quote }} /etc/update-motd.d.cis-disabled/"
+    removes: "{{ item }}"
+  loop: "{{ cis_motd_scripts.stdout_lines | default([]) }}"
+  tags: [cis_1.6.1, cis_1.6.4, banner]
+
+- name: "1.6.4 | Vaciar MOTD dinámico ya generado"
+  ansible.builtin.shell:
+    cmd: |
+        set -o pipefail
+        os_id="$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')"
+        changed=0
+        for f in $(grep -hPo '^[^#]*\bpam_motd\.so\b.*\bmotd=\K\S+' /etc/pam.d/* 2>/dev/null | sort -u) /run/motd; do
+          if [ -f "$f" ] && grep -Piq -- "(\\\\v|\\\\r|\\\\m|\\\\s|\\b${os_id}\\b)" "$f"; then
+            : > "$f"; changed=1
+          fi
+        done
+        echo "changed=${changed}"
+  args:
+    executable: /bin/bash
+  register: cis_motd_dyn
+  changed_when: "'changed=1' in cis_motd_dyn.stdout"
+  when:
+    - "'1.6.4' not in cis_skip_controls"
+    - cis_motd_disable_dynamic | bool
+  tags: [cis_1.6.4, banner]
+
+- name: "1.6.2/1.6.3 | /etc/issue y /etc/issue.net con banner corporativo"
+  ansible.builtin.copy:
+    dest: "{{ item.path }}"
+    content: "{{ cis_banner_text }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { id: "1.6.2", path: /etc/issue }
+    - { id: "1.6.3", path: /etc/issue.net }
+  loop_control:
+    label: "{{ item.id }} {{ item.path }}"
+  when: item.id not in cis_skip_controls
+  tags: [cis_1.6.2, cis_1.6.3, cis_1.6.7, cis_1.6.8, banner]
+
+- name: "1.6.6/1.6.7/1.6.8/1.6.10 | Permisos de archivos de banner (root:root, <=0644)"
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: root
+    group: root
+    mode: "u-x,go-wx"
+  loop:
+    - { id: "1.6.6", path: /etc/motd }
+    - { id: "1.6.7", path: /etc/issue }
+    - { id: "1.6.8", path: /etc/issue.net }
+    - { id: "1.6.10", path: "{{ cis_ssh_banner_file }}" }
+  loop_control:
+    label: "{{ item.id }} {{ item.path }}"
+  when: item.id not in cis_skip_controls
+  failed_when: false
+  tags: [cis_1.6.6, cis_1.6.7, cis_1.6.8, cis_1.6.10, banner]
+
+- name: "1.6.9 | Obtener archivos motd= referenciados por pam_motd"
+  ansible.builtin.shell:
+    cmd: |
+        set -o pipefail
+        grep -hPo '^[^#]*motd=\K\S+' /etc/pam.d/* 2>/dev/null | sort -u || true
+  args:
+    executable: /bin/bash
+  register: cis_pam_motd_files
+  changed_when: false
+  check_mode: false
+  tags: [cis_1.6.9, banner]
+
+- name: "1.6.9 | Verificar existencia de archivos pam_motd"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ cis_pam_motd_files.stdout_lines | default([]) }}"
+  register: cis_pam_motd_stat
+  tags: [cis_1.6.9, banner]
+
+- name: "1.6.9 | Permisos de archivos pam_motd (root:root, <=0644)"
+  ansible.builtin.file:
+    path: "{{ item.item }}"
+    owner: root
+    group: root
+    mode: "u-x,go-wx"
+  loop: "{{ cis_pam_motd_stat.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - "'1.6.9' not in cis_skip_controls"
+    - item.stat is defined and item.stat.exists
+  tags: [cis_1.6.9, banner]
+
+# ---------------------------------------------------------------- 1.7 GDM -----
+- name: "1.7.x | Hardening de GDM (solo si gdm3 está instalado)"
+  when: "'gdm3' in ansible_facts.packages"
+  tags: [cis_1.7.1, cis_1.7.2, cis_1.7.3, cis_1.7.4, cis_1.7.5, cis_1.7.6, gdm]
+  block:
+    - name: "1.7.x | Perfil dconf user: user-db:user"
+      ansible.builtin.lineinfile:
+        path: /etc/dconf/profile/user
+        line: "user-db:user"
+        insertbefore: BOF
+        create: true
+        owner: root
+        group: root
+        mode: "0644"
+      notify: CIS dconf update
+
+    - name: "1.7.x | Perfil dconf user: system-db:local"
+      ansible.builtin.lineinfile:
+        path: /etc/dconf/profile/user
+        line: "system-db:local"
+        insertafter: '^user-db:user'
+      notify: CIS dconf update
+
+    - name: "1.7.x | Directorios de base dconf local"
+      ansible.builtin.file:
+        path: /etc/dconf/db/local.d/locks
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: "1.7.1-1.7.5 | Keyfile dconf CIS"
+      ansible.builtin.template:
+        src: dconf-cis.j2
+        dest: /etc/dconf/db/local.d/60-cis
+        owner: root
+        group: root
+        mode: "0644"
+      notify: CIS dconf update
+
+    - name: "1.7.1-1.7.5 | Locks dconf CIS"
+      ansible.builtin.template:
+        src: dconf-cis-locks.j2
+        dest: /etc/dconf/db/local.d/locks/60-cis
+        owner: root
+        group: root
+        mode: "0644"
+      notify: CIS dconf update
+
+    - name: "1.7.6 | Deshabilitar XDMCP en GDM"
+      ansible.builtin.replace:
+        path: "{{ item }}"
+        after: '\[xdmcp\]'
+        regexp: '^(\s*Enable\s*=\s*true.*)$'
+        replace: '# \1'
+      loop: [/etc/gdm3/custom.conf, /etc/gdm3/daemon.conf]
+      when: "'1.7.6' not in cis_skip_controls"
+      failed_when: false

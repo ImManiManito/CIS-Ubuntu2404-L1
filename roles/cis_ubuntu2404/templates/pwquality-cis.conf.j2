@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# CIS 5.3.3.2.x - Calidad de contraseñas (aplica solo al CAMBIAR contraseña)
+{% set ids = {'difok': '5.3.3.2.1', 'minlen': '5.3.3.2.2', 'minclass': '5.3.3.2.3', 'maxrepeat': '5.3.3.2.4', 'maxsequence': '5.3.3.2.5', 'dictcheck': '5.3.3.2.6', 'enforcing': '5.3.3.2.7'} %}
+{% for k, v in cis_pwquality.items() %}
+{% if ids.get(k, 'x') not in cis_skip_controls %}
+# CIS {{ ids.get(k, '') }}
+{{ k }} = {{ v }}
+{% endif %}
+{% endfor %}
+{% if '5.3.3.2.8' not in cis_skip_controls %}
+# CIS 5.3.3.2.8
+enforce_for_root
+{% endif %}

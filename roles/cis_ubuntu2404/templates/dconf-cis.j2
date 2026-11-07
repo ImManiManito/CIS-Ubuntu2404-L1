@@ -1,0 +1,31 @@
+# {{ ansible_managed }}
+# CIS 1.7.x - GDM
+{% if '1.7.1' not in cis_skip_controls or '1.7.2' not in cis_skip_controls %}
+[org/gnome/login-screen]
+{% if '1.7.1' not in cis_skip_controls %}
+banner-message-enable=true
+banner-message-text='{{ cis_banner_text }}'
+{% endif %}
+{% if '1.7.2' not in cis_skip_controls %}
+disable-user-list=true
+{% endif %}
+{% endif %}
+{% if '1.7.3' not in cis_skip_controls %}
+
+[org/gnome/desktop/session]
+idle-delay=uint32 {{ cis_gdm_idle_delay }}
+
+[org/gnome/desktop/screensaver]
+lock-delay=uint32 {{ cis_gdm_lock_delay }}
+{% endif %}
+{% if '1.7.4' not in cis_skip_controls or '1.7.5' not in cis_skip_controls %}
+
+[org/gnome/desktop/media-handling]
+{% if '1.7.4' not in cis_skip_controls %}
+automount=false
+automount-open=false
+{% endif %}
+{% if '1.7.5' not in cis_skip_controls %}
+autorun-never=true
+{% endif %}
+{% endif %}

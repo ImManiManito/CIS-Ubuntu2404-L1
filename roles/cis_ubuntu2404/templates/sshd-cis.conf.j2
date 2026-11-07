@@ -1,0 +1,75 @@
+# {{ ansible_managed }}
+# CIS Ubuntu 24.04 v2.0.0 L1 - Hardening de OpenSSH
+# En sshd gana la PRIMERA aparición de cada parámetro: este archivo (01-) se
+# carga antes que el resto de sshd_config.d/ y que el cuerpo de sshd_config.
+{% set s = cis_skip_controls %}
+{% set c = cis_critical_controls %}
+{% if '5.1.4' in c and '5.1.4' not in s %}
+# CIS 5.1.4 - solo miembros del grupo {{ cis_ssh_allow_group }}
+AllowGroups {{ cis_ssh_allow_group }}
+{% endif %}
+{% if '1.6.5' not in s and '5.1.5' not in s %}
+# CIS 1.6.5 / 5.1.5
+Banner {{ cis_ssh_banner_file }}
+{% endif %}
+{% if '5.1.7' not in s %}
+# CIS 5.1.7
+ClientAliveInterval {{ cis_sshd_client_alive_interval }}
+ClientAliveCountMax {{ cis_sshd_client_alive_count_max }}
+{% endif %}
+{% if '5.1.10' not in s %}
+# CIS 5.1.10
+HostbasedAuthentication no
+{% endif %}
+{% if '5.1.11' not in s %}
+# CIS 5.1.11
+IgnoreRhosts yes
+{% endif %}
+{% if '5.1.13' not in s %}
+# CIS 5.1.13
+LoginGraceTime {{ cis_sshd_login_grace_time }}
+{% endif %}
+{% if '5.1.14' not in s %}
+# CIS 5.1.14
+LogLevel {{ cis_sshd_log_level }}
+{% endif %}
+{% if '5.1.16' not in s %}
+# CIS 5.1.16
+MaxAuthTries {{ cis_sshd_max_auth_tries }}
+{% endif %}
+{% if '5.1.17' not in s %}
+# CIS 5.1.17
+MaxStartups {{ cis_sshd_max_startups }}
+{% endif %}
+{% if '5.1.18' not in s %}
+# CIS 5.1.18
+MaxSessions {{ cis_sshd_max_sessions }}
+{% endif %}
+{% if '5.1.19' not in s %}
+# CIS 5.1.19
+PermitEmptyPasswords no
+{% endif %}
+{% if '5.1.21' not in s %}
+# CIS 5.1.21
+PermitUserEnvironment no
+{% endif %}
+{% if '5.1.22' not in s %}
+# CIS 5.1.22
+UsePAM yes
+{% endif %}
+{% if '5.1.20' in c and '5.1.20' not in s %}
+# CIS 5.1.20
+PermitRootLogin no
+{% endif %}
+{% if '5.1.6' in c and '5.1.6' not in s and cis_sshd_ciphers_eff | length > 0 %}
+# CIS 5.1.6
+Ciphers {{ cis_sshd_ciphers_eff | join(',') }}
+{% endif %}
+{% if (('5.1.12' in c and '5.1.12' not in s) or ('5.1.23' in c and '5.1.23' not in s)) and cis_sshd_kex_eff | length > 0 %}
+# CIS 5.1.12 / 5.1.23 (KEX post-cuántico primero)
+KexAlgorithms {{ cis_sshd_kex_eff | join(',') }}
+{% endif %}
+{% if '5.1.15' in c and '5.1.15' not in s and cis_sshd_macs_eff | length > 0 %}
+# CIS 5.1.15
+MACs {{ cis_sshd_macs_eff | join(',') }}
+{% endif %}

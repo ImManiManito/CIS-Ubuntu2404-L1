@@ -1,0 +1,29 @@
+---
+# =============================================================================
+# SECCIÓN 4 - Firewall (UFW)
+# Solo se instala UFW (4.1.1). NO se habilita ni se cambian políticas por
+# defecto: 4.1.2, 4.1.3 y 4.1.5 quedan para revisión manual (riesgo de
+# perder acceso / cortar tráfico de aplicaciones).
+# =============================================================================
+
+- name: "4.1.1 | Detectar firewall persistente alternativo (iptables-persistent/netfilter-persistent)"
+  ansible.builtin.set_fact:
+    cis_alt_firewall: "{{ ['iptables-persistent', 'netfilter-persistent', 'firewalld'] | intersect(ansible_facts.packages.keys() | list) }}"
+  tags: [cis_4.1.1, firewall]
+
+- name: "4.1.1 | Instalar ufw (sin habilitarlo)"
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+  when:
+    - "'4.1.1' not in cis_skip_controls"
+    - cis_alt_firewall | length == 0
+  tags: [cis_4.1.1, firewall]
+
+- name: "4.1.1 | Registrar conflicto con firewall alternativo"
+  ansible.builtin.set_fact:
+    cis_deferred: "{{ cis_deferred + [{'id': '4.1.1', 'motivo': 'Instalado ' ~ (cis_alt_firewall | join(', ')) ~ ': instalar ufw podría desinstalarlo por conflicto de paquetes. No se instaló.'}] }}"
+  when:
+    - "'4.1.1' not in cis_skip_controls"
+    - cis_alt_firewall | length > 0
+  tags: [cis_4.1.1, firewall]

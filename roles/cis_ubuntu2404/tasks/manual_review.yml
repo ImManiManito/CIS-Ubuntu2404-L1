@@ -1,0 +1,44 @@
+---
+# =============================================================================
+# REVISIÓN MANUAL - Solo lectura. No modifica el sistema (corre igual en --check).
+# =============================================================================
+- name: "REVISIÓN MANUAL | Recolectar evidencia de controles críticos"
+  ansible.builtin.shell:
+    cmd: "{{ item.cmd }}"
+  args:
+    executable: /bin/bash
+  loop: "{{ cis_manual_controls }}"
+  loop_control:
+    label: "{{ item.id }} {{ item.titulo | truncate(60) }}"
+  register: cis_manual_results
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  timeout: "{{ cis_find_timeout | int + 120 }}"
+
+- name: "REVISIÓN MANUAL | Controles críticos que el playbook remedia"
+  ansible.builtin.set_fact:
+    cis_critical_expanded: >-
+      {{ (cis_critical_controls | difference(cis_skip_controls))
+         + (['5.3.2.1'] if '5.3.2.x' in cis_critical_controls else [])
+         + (['5.3.3.4.1'] if '5.3.3.4.x' in cis_critical_controls else [])
+         + (['2.3.x'] if (['2.3.2.1', '2.3.3.1'] | intersect(cis_critical_controls) | length > 0) else [])
+         + (['3.3.1.2'] if not cis_forwarding_only_if_disabled | bool else []) }}
+
+- name: "REVISIÓN MANUAL | Consolidar resultados"
+  ansible.builtin.set_fact:
+    cis_manual_report: >-
+      {{ cis_manual_report | default([]) + [{
+           'id': item.item.id,
+           'titulo': item.item.titulo,
+           'riesgo': item.item.riesgo,
+           'accion': item.item.accion,
+           'estado': ('CUMPLE' if (item.stdout_lines | default(['']) | first | default('')) is search('ESTADO: CUMPLE')
+                      else ('N/A' if (item.stdout_lines | default(['']) | first | default('')) is search('ESTADO: N/A') else 'REVISAR')),
+           'evidencia': (item.stdout_lines | default([]))[1:] | reject('match', '^\s*$') | list,
+           'error': item.stderr | default(''),
+           'aplicado': (item.item.id | regex_findall('[0-9]+(?:[.][0-9x]+)+') | intersect(cis_critical_expanded) | length > 0)
+         }] }}
+  loop: "{{ cis_manual_results.results }}"
+  loop_control:
+    label: "{{ item.item.id }}"
